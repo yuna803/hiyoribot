@@ -1,0 +1,18 @@
+# 本地环境和编辑器文件
+.idea/
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+agent_work/
+
+# 私有配置与运行产物
+.env
+config.yaml
+*.log
+*.sqlite3
+
+# 游戏原始资源只保留在本机，仓库仅放整理后的简短角色资料
+*.pfs
+*.ast
+*.rar

@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <script src="/assets/app.js" defer></script>
+    <title>HiyoriBot</title>
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand"><span class="avatar" aria-hidden="true">H</span><strong>HiyoriBot</strong></div>
+        <button id="new-chat" class="primary wide" type="button">＋ 新对话</button>
+        <h2>会话记录</h2>
+        <nav id="conversation-list" aria-label="会话列表"></nav>
+        <div class="sidebar-actions">
+          <button id="character-button" class="secondary wide" type="button">角色设定</button>
+          <button id="memory-button" class="secondary wide" type="button">长期记忆</button>
+        </div>
+      </aside>
+
+      <main class="chat">
+        <header>
+          <div>
+            <h1 id="chat-title">新对话</h1>
+            <p class="subtitle">V0.8 · 角色、会话与长期记忆</p>
+            <p id="recall-info" class="recall-info">每轮会带上最近消息，并按需召回长期记忆。</p>
+          </div>
+        </header>
+
+        <section id="messages" aria-label="聊天消息">
+          <div class="welcome" id="welcome">
+            <div class="welcome-mark" aria-hidden="true">✦</div>
+            <h2>来聊聊吧</h2>
+            <p>聊天记录会保存；相关角色资料和长期记忆会按需加入上下文。</p>
+          </div>
+        </section>
+
+        <footer>
+          <form id="chat-form">
+            <textarea id="message" aria-label="输入消息" placeholder="输入消息…" maxlength="4000" rows="1" required></textarea>
+            <button id="send" class="primary" type="submit">发送</button>
+          </form>
+          <label class="thinking-toggle" for="thinking-enabled">
+            <input id="thinking-enabled" type="checkbox" checked /> 显示模型思考
+          </label>
+          <p id="status" role="alert" hidden></p>
+          <p class="hint">Enter 发送，Shift + Enter 换行 · 思考内容会与回复分开保存</p>
+        </footer>
+      </main>
+    </div>
+
+    <dialog id="character-dialog" class="settings-dialog">
+      <form id="character-form">
+        <div class="dialog-heading"><h2>角色设定</h2><button class="icon-button" type="button" data-close="character-dialog" aria-label="关闭">×</button></div>
+        <label for="character-name">角色名称</label>
+        <input id="character-name" maxlength="100" required />
+        <label for="character-description">角色描述</label>
+        <textarea id="character-description" rows="2" maxlength="2000"></textarea>
+        <label for="character-personality">性格</label>
+        <textarea id="character-personality" rows="2" maxlength="2000"></textarea>
+        <label for="character-background">背景</label>
+        <textarea id="character-background" rows="2" maxlength="2000"></textarea>
+        <label for="character-speaking-style">说话方式</label>
+        <textarea id="character-speaking-style" rows="2" maxlength="2000"></textarea>
+        <label for="system-prompt">System Prompt</label>
+        <textarea id="system-prompt" rows="6" maxlength="8000" required></textarea>
+        <p class="hint">这些字段会组合成每轮模型请求最前面的 System 消息。</p>
+        <p id="role-knowledge-count" class="hint">原作角色资料：加载中…</p>
+        <p id="character-status" class="dialog-status" role="alert" hidden></p>
+        <div class="dialog-actions"><button class="primary" type="submit">保存设定</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="memory-dialog" class="settings-dialog memory-dialog">
+      <div class="dialog-heading"><h2>长期记忆</h2><button class="icon-button" type="button" data-close="memory-dialog" aria-label="关闭">×</button></div>
+      <p class="hint">模型会从用户消息中提取稳定事实；你可以手动新增、编辑、合并或遗忘。“遗忘”仅删除长期记忆，原聊天记录仍保留。</p>
+      <p id="memory-status" class="dialog-status" role="alert" hidden></p>
+      <div class="dialog-actions"><button id="refresh-memories" class="secondary" type="button">刷新列表</button></div>
+      <div id="memory-list" class="memory-list"></div>
+
+      <form id="add-memory-form" class="stacked-form">
+        <h3>手动新增</h3>
+        <label for="new-memory">记忆内容</label>
+        <textarea id="new-memory" maxlength="300" rows="2" required></textarea>
+        <label for="new-importance">重要度（1～5）</label>
+        <input id="new-importance" type="number" min="1" max="5" value="3" required />
+        <button class="primary" type="submit">添加记忆</button>
+      </form>
+
+      <form id="merge-memory-form" class="stacked-form">
+        <h3>合并勾选的记忆</h3>
+        <label for="merged-memory">合并后的内容</label>
+        <textarea id="merged-memory" maxlength="300" rows="2" required></textarea>
+        <label for="merged-importance">合并后的重要度（1～5）</label>
+        <input id="merged-importance" type="number" min="1" max="5" value="3" required />
+        <button class="secondary" type="submit">合并所选</button>
+      </form>
+    </dialog>
+  </body>
+</html>

@@ -1,0 +1,8 @@
+# 复制为 config.yaml 后可填写本地配置。config.yaml 已加入 .gitignore。
+api_key: ""
+model: "deepseek-flash"
+base_url: "https://api.deepseek.com"
+# 每次成功聊天后再调用一次模型提取长期记忆；会增加一次模型请求。
+auto_extract_memory: true
+# 本机或远程 PostgreSQL＋pgvector 连接地址；也可设置 DATABASE_URL 环境变量。
+database_url: ""
