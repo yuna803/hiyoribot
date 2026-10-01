@@ -16,3 +16,8 @@ config.yaml
 *.pfs
 *.ast
 *.rar
+*.ogg
+*.wav
+*.pth
+*.ckpt
+*.pt

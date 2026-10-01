@@ -86,6 +86,10 @@ $env:DEEPSEEK_API_KEY = Read-Host "DeepSeek API Key"
 
 向量使用 FastEmbed 的 `BAAI/bge-small-zh-v1.5`，维度为 512。第一次提取或检索长期记忆时会下载约 90 MB 模型，之后使用本地缓存；这一步不调用 DeepSeek 的 embedding API。模型与维度见 [FastEmbed 官方列表](https://qdrant.github.io/fastembed/examples/Supported_Models/)。
 
+### 日语 TTS 试训
+
+已用共通线和妃爱线的原版日文台词与配音做本机离线试训；这阶段不接聊天网页。训练数据、模型权重和试听音频均在仓库外，操作与复现脚本见 [试训说明](tools/README.md)。
+
 ### 导入本机汉化对话
 
 游戏汉化补丁内已有中文剧本，无需调用翻译 API。当前导入范围是共通线与妃爱线的 87 个脚本；其他角色路线和额外成人场景不在范围内。每条正文保留脚本名、序号、说话人和汉化原话；相邻对话另做向量索引。两张原作对话表与用户长期记忆表分开，聊天时只召回少量相关片段。
