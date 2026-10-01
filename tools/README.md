@@ -32,3 +32,5 @@ python tools/tts_pilot_evaluate.py --dataset 'E:\unser\q\hiyori_tts\pilot_v1' --
 ```
 
 识别错误率只用于发现明显漏字、重复或发音变化；音色与自然度仍要靠试听判断。
+
+用户已选择最终权重作为当前使用版本。本机 `pilot_v1/active_model.json` 指向 SoVITS 第 4 轮和 GPT 第 5 轮权重，后续接入时以它为准；训练权重文件不提交公开仓库。
