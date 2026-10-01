@@ -46,6 +46,53 @@ function addBubble(role, text, extraClass = "") {
   return bubble;
 }
 
+function addSpeechControl(bubble, text) {
+  const controls = document.createElement("div");
+  controls.className = "speech-controls";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary";
+  button.textContent = "▶ 妃爱配音";
+  button.title = "提取台词并译成日语，再用本机模型配音";
+  const caption = document.createElement("small");
+  caption.className = "speech-caption";
+  const audio = document.createElement("audio");
+  audio.controls = true;
+  audio.preload = "none";
+  audio.hidden = true;
+
+  button.addEventListener("click", async () => {
+    if (audio.src) {
+      audio.currentTime = 0;
+      await audio.play().catch(() => {});
+      return;
+    }
+    button.disabled = true;
+    button.textContent = "正在生成配音…";
+    caption.textContent = "";
+    try {
+      const data = await api("/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!bubble.isConnected) return;
+      caption.textContent = `日语台词：${data.japanese}`;
+      audio.src = data.audio_url;
+      audio.hidden = false;
+      button.textContent = "▶ 重新播放";
+      await audio.play().catch(() => {}); // 浏览器拒绝自动播放时仍可用控件播放。
+    } catch (error) {
+      caption.textContent = error instanceof Error ? error.message : "配音生成失败";
+      button.textContent = "重试配音";
+    } finally {
+      button.disabled = false;
+    }
+  });
+  controls.append(button, caption, audio);
+  bubble.append(controls);
+}
+
 function addReasoning(text = "") {
   const box = document.createElement("details");
   box.className = "reasoning-box";
@@ -94,7 +141,8 @@ async function loadHistory(id) {
     messages.replaceChildren();
     for (const item of data.messages) {
       if (item.role === "assistant" && item.reasoning) addReasoning(item.reasoning);
-      addBubble(item.role, item.content);
+      const bubble = addBubble(item.role, item.content);
+      if (item.role === "assistant") addSpeechControl(bubble, item.content);
     }
     if (data.messages.length === 0) showWelcome();
     await refreshConversations();
@@ -209,6 +257,7 @@ form.addEventListener("submit", async (event) => {
       } else if (name === "done") {
         if (thought.box.hidden) thought.box.remove();
         else thought.summary.textContent = "模型思考（展开/收起）";
+        addSpeechControl(pending, pending.textContent);
       }
     });
     await refreshConversations();

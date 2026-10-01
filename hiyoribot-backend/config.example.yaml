@@ -6,3 +6,5 @@ base_url: "https://api.deepseek.com"
 auto_extract_memory: true
 # 本机或远程 PostgreSQL＋pgvector 连接地址；也可设置 DATABASE_URL 环境变量。
 database_url: ""
+# GPT-SoVITS 试训目录（包含 pilot_v1、env、GPT-SoVITS）；也可用 HIYORI_TTS_HOME。
+tts_home: ""

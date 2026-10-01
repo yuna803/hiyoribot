@@ -86,9 +86,15 @@ $env:DEEPSEEK_API_KEY = Read-Host "DeepSeek API Key"
 
 向量使用 FastEmbed 的 `BAAI/bge-small-zh-v1.5`，维度为 512。第一次提取或检索长期记忆时会下载约 90 MB 模型，之后使用本地缓存；这一步不调用 DeepSeek 的 embedding API。模型与维度见 [FastEmbed 官方列表](https://qdrant.github.io/fastembed/examples/Supported_Models/)。
 
-### 日语 TTS 试训
+### 日语 TTS 配音
 
-已用共通线和妃爱线的原版日文台词与配音做本机离线试训；这阶段不接聊天网页。训练数据、模型权重和试听音频均在仓库外，操作与复现脚本见 [试训说明](tools/README.md)。
+已用共通线和妃爱线的原版日文台词与配音做本机试训，训练数据和最终权重都留在仓库外，详见 [试训说明](tools/README.md)。在被 Git 忽略的 `hiyoribot-backend/config.yaml` 配置本机目录：
+
+```yaml
+tts_home: 'E:/unser/q/hiyori_tts'
+```
+
+也可设置 `HIYORI_TTS_HOME` 环境变量。目录内需保留 `pilot_v1/active_model.json`、训练参考音频、`GPT-SoVITS` 和独立的 `env`。聊天页面每条助手回复下方有「妃爱配音」按钮；点击后 DeepSeek 提取并翻译一两句台词，再用选定的最终权重在本机生成日语音频。页面显示译文并提供播放控件；同一回复再次请求时读取本机 `pilot_v1/web_audio` 缓存。它不会配音模型思考内容，也不会自动播放每条消息。翻译会增加一次 DeepSeek 请求。
 
 ### 导入本机汉化对话
 

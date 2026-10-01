@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 import memory_service
 import storage
+import tts_service
 
 app = FastAPI(title="Hiyori Bot", version="0.8.0")
 CONFIG_PATH = Path(__file__).with_name("config.yaml")
@@ -32,6 +33,7 @@ class AppConfig(BaseModel):
     base_url: str = "https://api.deepseek.com"
     auto_extract_memory: bool = True
     database_url: str = ""
+    tts_home: str = ""
 
 
 def load_config() -> AppConfig:
@@ -56,6 +58,7 @@ def resolve_config() -> AppConfig:
         base_url=os.getenv("DEEPSEEK_BASE_URL") or config.base_url,
         auto_extract_memory=config.auto_extract_memory,
         database_url=config.database_url,
+        tts_home=os.getenv("HIYORI_TTS_HOME") or config.tts_home,
     )
     if not resolved.api_key:
         raise HTTPException(status_code=503, detail="尚未配置 DeepSeek API Key")
@@ -82,6 +85,18 @@ class ChatResponse(BaseModel):
     reasoning: str | None = None
     conversation_id: UUID
     recalled_memory_ids: list[int]
+
+
+class SpeechRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("text")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("回复不能为空")
+        return value
 
 
 class CharacterUpdate(BaseModel):
@@ -386,6 +401,21 @@ def get_messages(conversation_id: UUID) -> dict:
     if conversation is None:
         raise HTTPException(status_code=404, detail="会话不存在")
     return {"conversation": conversation, "messages": storage.list_messages(conversation_id)}
+
+
+@app.post("/tts")
+def create_speech(body: SpeechRequest) -> dict[str, str]:
+    """点击播放时才翻译和合成；重复的回复直接复用本机缓存。"""
+    config = resolve_config()
+    return tts_service.create_speech(body.text, config)
+
+
+@app.get("/tts/audio/{key}")
+def get_speech_audio(key: str) -> FileResponse:
+    config = resolve_config()
+    path = tts_service.cached_audio(key, config.tts_home)
+    return FileResponse(path, media_type="audio/wav", filename="hiyori.wav",
+                        content_disposition_type="inline")
 
 
 def memory_embedding(content: str) -> list[float]:
