@@ -8,6 +8,28 @@ from pathlib import Path
 
 MAX_TEXT_CHARS = 8000
 MAX_AUDIO_SECONDS = 1800
+NLTK_RESOURCES = {
+    "cmudict": "corpora/cmudict.zip",
+    "averaged_perceptron_tagger": "taggers/averaged_perceptron_tagger.zip",
+    "averaged_perceptron_tagger_eng": "taggers/averaged_perceptron_tagger_eng/",
+}
+
+
+def prepare_nltk_resources(home: Path) -> None:
+    """先检查英语发音依赖，避免遇到拉丁字母时才在 GPU 推理中途报错。"""
+    import nltk
+    directory = str(home / "env" / "nltk_data")
+    if directory not in nltk.data.path:
+        nltk.data.path.insert(0, directory)
+    missing = []
+    for name, path in NLTK_RESOURCES.items():
+        try:
+            nltk.data.find(path)
+        except LookupError:
+            missing.append(name)
+    if missing:
+        # 给后端一个固定标记；完整诊断保存在本机，不在聊天时自动联网下载。
+        raise RuntimeError("TTS_RESOURCE_MISSING:" + ",".join(missing))
 
 
 def split_japanese_text(text: str, limit: int = 160) -> list[str]:
@@ -28,6 +50,7 @@ def split_japanese_text(text: str, limit: int = 160) -> list[str]:
 def generate(home: Path, output: Path, text: str) -> None:
     if not text or len(text) > MAX_TEXT_CHARS:
         raise ValueError("日语台词为空或过长")
+    prepare_nltk_resources(home)
     root = home / "GPT-SoVITS"
     dataset = home / "pilot_v1"
     active = json.loads((dataset / "active_model.json").read_text(encoding="utf-8"))

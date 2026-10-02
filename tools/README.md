@@ -34,3 +34,15 @@ python tools/tts_pilot_evaluate.py --dataset 'E:\unser\q\hiyori_tts\pilot_v1' --
 识别错误率只用于发现明显漏字、重复或发音变化；音色与自然度仍要靠试听判断。
 
 用户已选择最终权重作为当前使用版本。本机 `pilot_v1/active_model.json` 指向 SoVITS 第 4 轮和 GPT 第 5 轮权重，后续接入时以它为准；训练权重文件不提交公开仓库。
+
+## 混合日语与英文的发音资源
+
+GPT-SoVITS 的 `all_ja` 仍会把拉丁字母片段交给英语发音模块。需要 NLTK 的 `cmudict`、`averaged_perceptron_tagger` 和新版 `averaged_perceptron_tagger_eng`。只含日文的测试可能不会触发这些依赖；遇到英文词再自动下载容易因网络或代理检查失败。
+
+从 [NLTK 官方数据索引](https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/index.xml) 下载这三个包对应的官方 ZIP，将索引中这三个 `<package>` 的属性作为 JSON 数组保存为同目录的 `packages.json`（须包含 `id` 与 `sha256_checksum`）。本机已核验的文件位于 `E:\unser\q\hiyori_tts\downloads\nltk`。用独立 TTS Python 离线安装：
+
+```powershell
+& 'E:\unser\q\hiyori_tts\env\python.exe' tools/setup_tts_resources.py --home 'E:\unser\q\hiyori_tts' --archives 'E:\unser\q\hiyori_tts\downloads\nltk'
+```
+
+脚本校验 SHA256 与解压路径，只写 `hiyori_tts/env/nltk_data`；保留 ZIP 以满足 `g2p_en` 的导入检查，并实际加载词典与英语词性标注器。配音 worker 在加载 GPU 模型前检查这些资源，缺少时明确报错，不在聊天过程中下载。其他合成失败的完整诊断保存在仓库外 `pilot_v1/web_audio/*.error.log`。

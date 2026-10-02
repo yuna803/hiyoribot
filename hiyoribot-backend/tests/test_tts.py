@@ -7,14 +7,14 @@ import unittest
 import wave
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from main import app
-from tts_service import _translate_japanese, extract_spoken_text
-from tts_worker import split_japanese_text
+from tts_service import _synthesize, _translate_japanese, extract_spoken_text
+from tts_worker import NLTK_RESOURCES, prepare_nltk_resources, split_japanese_text
 
 
 class SpeechRouteTests(unittest.TestCase):
@@ -85,6 +85,30 @@ class SpeechRouteTests(unittest.TestCase):
 
 
 class SpeechFidelityTests(unittest.TestCase):
+    def test_missing_pronunciation_data_is_reported_before_loading_model(self) -> None:
+        fake = SimpleNamespace(data=SimpleNamespace(path=[], find=Mock(side_effect=LookupError)))
+        with patch.dict("sys.modules", {"nltk": fake}):
+            with self.assertRaisesRegex(RuntimeError, "TTS_RESOURCE_MISSING:cmudict"):
+                prepare_nltk_resources(Path("tts-home"))
+        self.assertEqual(fake.data.find.call_count, len(NLTK_RESOURCES))
+
+    def test_resource_failure_is_actionable_and_full_diagnostic_stays_local(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            (home / "env").mkdir()
+            (home / "env" / "python.exe").touch()
+            (home / "GPT-SoVITS").mkdir()
+            output = home / "audio.wav"
+            result = SimpleNamespace(returncode=1, stderr="trace\nRuntimeError: TTS_RESOURCE_MISSING:cmudict\n",
+                                     stdout="private pronunciation context")
+            with patch("tts_service.subprocess.run", return_value=result):
+                with self.assertRaises(HTTPException) as caught:
+                    _synthesize("日文に suddenly が混じる。", output, home)
+            self.assertEqual(caught.exception.status_code, 503)
+            self.assertIn("cmudict", caught.exception.detail)
+            self.assertNotIn("private", caught.exception.detail)
+            self.assertIn(result.stdout, output.with_suffix(".error.log").read_text(encoding="utf-8"))
+
     def test_all_spoken_paragraphs_are_preserved_in_order(self) -> None:
         source = "（把碗放下）哥哥，晚上一起吃布丁吧。\n\n（清嗓（模仿别人））那句话是别人说的。\n\n你想听哪种语气？\n\n（转身收拾）饭快凉了。"
         self.assertEqual(extract_spoken_text(source),

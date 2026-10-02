@@ -17,7 +17,7 @@ import httpx
 
 import llm_runtime
 
-from tts_worker import MAX_AUDIO_SECONDS, MAX_TEXT_CHARS
+from tts_worker import MAX_AUDIO_SECONDS, MAX_TEXT_CHARS, NLTK_RESOURCES
 
 _lock = Lock()  # 单张显卡一次只运行一个合成进程。
 _log = logging.getLogger(__name__)
@@ -108,8 +108,17 @@ def _synthesize(japanese: str, output: Path, home: Path) -> None:
         _log.warning("TTS 进程无法完成：%s", type(exc).__name__)
         raise HTTPException(status_code=502, detail="本机配音生成超时或无法启动") from exc
     if result.returncode != 0:
+        # 日文/英文混合输入的完整异常留在仓库外，便于定位触发的发音分支。
+        diagnostic = output.with_suffix(".error.log")
+        try:
+            diagnostic.write_text(result.stderr + "\n--- stdout ---\n" + result.stdout, encoding="utf-8")
+        except OSError:
+            _log.warning("TTS 诊断日志无法写入")
         _log.error("TTS 进程失败，退出码 %s，错误末尾：%s",
                    result.returncode, result.stderr[-1000:])
+        missing = re.search(r"TTS_RESOURCE_MISSING:([a-z_,]+)", result.stderr)
+        if missing and all(name in NLTK_RESOURCES for name in missing[1].split(",")):
+            raise HTTPException(status_code=503, detail="配音环境缺少发音资源：" + missing[1] + "，请补齐后重试")
         raise HTTPException(status_code=502, detail="本机配音生成失败")
     try:
         with wave.open(str(output), "rb") as audio:
