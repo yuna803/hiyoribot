@@ -119,6 +119,7 @@ h1 { margin: 0; font-size: 19px; }
 .tool-sources[hidden] { display: none; }
 .tool-sources a { color: #5c53bc; overflow-wrap: anywhere; }
 .thinking-toggle { display: inline-flex; align-items: center; gap: 6px; margin-top: 9px; color: #69748c; font-size: 12px; }
+.thinking-toggle[hidden] { display: none; }
 .thinking-toggle input { width: 16px; height: 16px; margin: 0; }
 
 footer { padding: 16px 24px 20px; border-top: 1px solid #edf0f5; }

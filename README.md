@@ -4,6 +4,57 @@
 
 当前包含角色聊天、长短期记忆、模型主动工具查询和按需日语配音。
 
+## 本机小模型与角色微调
+
+本机模式通过 Ollama 运行 Qwen3-4B-Instruct-2507 的 Q4_K_M 量化模型。它提供正式回复和工具调用，不输出思考链。网页仍使用原来的角色卡、短期上下文、长期记忆和原作检索；微调只学习妃爱的接话和说话方式，剧情事实仍由检索库提供。
+
+本机 Ollama、模型、训练环境和结果放在仓库外的 `E:\unser\q\hiyori_llm`。启动模型服务：
+
+```powershell
+.\tools\start_local_llm.ps1
+```
+
+在被 Git 忽略的 `hiyoribot-backend/config.yaml` 设置以下字段，然后按后面的启动步骤运行网页：
+
+```yaml
+provider: local
+local_model: hiyori-base
+local_auxiliary_model: hiyori-base
+local_base_url: http://127.0.0.1:11434/v1
+local_tokenizer_path: 'E:/unser/q/hiyori_llm/models/tokenizer.json'
+local_context_tokens: 8192
+```
+
+`local_model` 用于聊天，`local_auxiliary_model` 用于记忆提取与忠实日语翻译，后者保留未微调的基础模型。`provider: local` 不读取 `DEEPSEEK_*` 环境变量，也不会在本地失败时回退收费 API。切回 `provider: deepseek` 才会使用原有云端配置。`GET /model-status` 只返回提供方、模型名称和是否支持思考，不暴露密钥或连接串。
+
+本地上下文用模型的 `tokenizer.json` 计算预算，预留输出和模板开销；超预算先删除完整旧问答，再删参考资料，不能容纳角色设定与当前问答时明确报错。每轮工具调用重新检查预算。本地聊天、记忆提取和配音串行使用显卡；配音翻译完成后必须成功卸载本项目的语言模型，才启动 GPT-SoVITS。缓存命中不重新合成。原始台词、训练数据和权重不提交 Git。
+
+### 原作对话数据与训练
+
+只读导出已入库的共通线和妃爱线中文台词，不使用用户私聊或机器人生成回复：
+
+```powershell
+.\hiyoribot-backend\venv\Scripts\python.exe tools\llm_pilot_dataset.py --output 'E:\unser\q\hiyori_llm\pilot_v1'
+```
+
+数据按原作说话人构造 user（智宏）/assistant（妃爱），最多保留三轮完整上下文；旁白和其他角色插话切断片段，相邻同说话人合并。按完整脚本分约 80/10/10 三组，再去掉重复目标回复；最终样本比例会因各脚本长度不同而变化。报告记录剔除原因和各组来源，公开代码不包含游戏全文。
+
+训练使用独立 `Hiyori-Train` Ubuntu WSL2，虚拟环境 `/opt/hiyori-env`，关键依赖见 [训练依赖](tools/llm-training-requirements.txt)。基础训练权重来自 `unsloth/Qwen3-4B-Instruct-2507-unsloth-bnb-4bit`，推理 GGUF 来自 `unsloth/Qwen3-4B-Instruct-2507-GGUF`；下载时固定 revision，并保留本机清单与完整依赖锁定文件。模型加载使用本机文件。训练前暂时停止网页服务，卸载 Ollama 模型，避免与训练竞争显存。
+
+```powershell
+wsl -d Hiyori-Train -u root -- /opt/hiyori-env/bin/python /mnt/e/unser/Desktop/hiyori_bot/tools/llm_pilot_train.py --model /mnt/e/unser/q/hiyori_llm/training_base --dataset /mnt/e/unser/q/hiyori_llm/pilot_v1 --stage auto
+```
+
+`auto` 先运行 1,024 tokens 的 20 步显存检查；CUDA OOM 才重试 512 tokens，两次 OOM 就停止。检查通过后重新加载模型，按 rank 8、批量 1、梯度累积 8、学习率 `1e-4` 训练两轮，只计算 assistant 回复的损失。长样本跳过并记录，不截断目标台词。保存每轮 adapter 和训练配置；训练中其他错误或 OOM 会停止，不自动加轮数。
+
+### 对照与使用门槛
+
+用 `tools/llm_pilot_evaluate.py --model ... --dataset ... --variant baseline|early|final` 在同一量化与采样条件下比较三组权重，包含新日常话题、连续聊天、未训练过的脚本对话、记忆提取和翻译。结果与 HTML 对照页只保存在本机。工具协议测试使用固定日期结果，再单独通过网页接口检查真实工具调用；对照输出限制为 256 tokens，并标记触及上限的回复。
+
+比较接话自然度、角色身份、复读、原作事实与工具能力；低训练损失不等于角色效果更好。本机默认先使用 `hiyori-base`，经用户对照体验后才切换候选角色权重。机器翻译和原作事实仍需核对，尤其注意漏词、称呼和人称。
+
+本轮两组 adapter 在新话题上出现工具标签复读，未通过使用门槛，保留在本机供检查，不导入 Ollama 作为聊天模型。当前 Unsloth 的合并流程要求原始 16 位基础权重；本轮直接合并 NF4 基础权重的尝试被拒绝，没有写出候选 GGUF。先排查回复标签、语料与训练配置，通过对照后再安排下一次训练与导出；本轮不增加训练轮数。
+
 ## 一条消息怎样运行
 
 ```text
@@ -13,7 +64,7 @@
   ├─ 同一会话最近的消息（短期上下文）
   └─ pgvector 找到的相关用户长期记忆
        ↓
-     DeepSeek → 按需调用查询工具 → 读取结果继续判断 → 流式回复 → 保存完整问答
+     本机模型或 DeepSeek → 按需调用查询工具 → 读取结果继续判断 → 流式回复 → 保存完整问答
        ↓
      后台再调用一次模型，提取稳定的用户事实 → 本地 embedding → pgvector
 ```
@@ -80,7 +131,7 @@ PostgreSQL 16.15 和 pgvector 0.8.6 已安装到 `E:\unser\q\postgresql`，数�
 $env:DEEPSEEK_API_KEY = Read-Host "DeepSeek API Key"
 ```
 
-环境变量优先于 YAML。`config.yaml` 已被 Git 忽略，[配置示例](hiyoribot-backend/config.example.yaml)没有真实 Key。配置里的 `auto_extract_memory: false` 可以关闭每轮的自动提取；默认开启时，每轮成功聊天会增加一次 DeepSeek 请求。
+DeepSeek 模式的环境变量优先于 YAML。`config.yaml` 已被 Git 忽略，[配置示例](hiyoribot-backend/config.example.yaml)没有真实 Key。配置里的 `auto_extract_memory: false` 可以关闭每轮的自动提取；默认开启时，每轮成功聊天会增加一次模型请求。本地模式请求基础辅助模型，DeepSeek 模式请求云端。
 
 ### 本地向量模型
 
@@ -104,9 +155,9 @@ $env:DEEPSEEK_API_KEY = Read-Host "DeepSeek API Key"
 tts_home: 'E:/unser/q/hiyori_tts'
 ```
 
-也可设置 `HIYORI_TTS_HOME` 环境变量。目录内需保留 `pilot_v1/active_model.json`、训练参考音频、`GPT-SoVITS` 和独立的 `env`。聊天页面每条助手回复下方有「妃爱配音」按钮；点击后按原顺序保留全部台词，要求 DeepSeek 完整、忠实地译成日语，再用选定的最终权重在本机生成音频。按当前角色回复约定，括号内容作为动作说明跳过；代码块不朗读，Markdown 链接保留可见文字。长译文分段合成后拼接，不挑一两句或做摘要。
+也可设置 `HIYORI_TTS_HOME` 环境变量。目录内需保留 `pilot_v1/active_model.json`、训练参考音频、`GPT-SoVITS` 和独立的 `env`。聊天页面每条助手回复下方有「妃爱配音」按钮；点击后按原顺序保留全部台词，要求配置的模型完整、忠实地译成日语，再用选定的最终权重在本机生成音频。按当前角色回复约定，括号内容作为动作说明跳过；代码块不朗读，Markdown 链接保留可见文字。长译文分段合成后拼接，不挑一两句或做摘要。
 
-页面显示完整日语译文，并可展开「查看中文配音原文」核对。翻译仍可能有错误，实际结果以中日对照和试听为准。它不会配音模型思考内容，也不会自动播放每条消息。翻译会增加一次 DeepSeek 请求；同一回复再次请求时读取本机 `pilot_v1/web_audio` 缓存。翻译规则与模型配置参与缓存键，旧版摘要配音不再自动复用；已有页面需刷新并重新点击配音。
+页面显示完整日语译文，并可展开「查看中文配音原文」核对。翻译仍可能有错误，实际结果以中日对照和试听为准。它不会配音模型思考内容，也不会自动播放每条消息。翻译会增加一次模型请求，本地模式使用基础辅助模型，DeepSeek 模式使用收费 API；同一回复再次请求时读取本机 `pilot_v1/web_audio` 缓存。翻译规则、提供方与辅助模型配置参与缓存键，旧版摘要配音不再自动复用；已有页面需刷新并重新点击配音。
 
 ### 导入本机汉化对话
 

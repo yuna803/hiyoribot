@@ -4,6 +4,8 @@ import json
 import os
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import psycopg
@@ -18,6 +20,7 @@ import memory_service
 import storage
 import tts_service
 import agent_service
+import llm_runtime
 
 app = FastAPI(title="Hiyori Bot", version="0.9.0")
 CONFIG_PATH = Path(__file__).with_name("config.yaml")
@@ -30,11 +33,17 @@ class AppConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     api_key: str = ""
+    provider: Literal["deepseek", "local"] = "deepseek"
     model: str = "deepseek-flash"
     base_url: str = "https://api.deepseek.com"
     auto_extract_memory: bool = True
     database_url: str = ""
     tts_home: str = ""
+    local_model: str = "hiyori-base"
+    local_auxiliary_model: str = "hiyori-base"
+    local_base_url: str = "http://127.0.0.1:11434/v1"
+    local_tokenizer_path: str = ""
+    local_context_tokens: int = Field(default=8192, ge=4096, le=8192)
 
 
 def load_config() -> AppConfig:
@@ -53,17 +62,40 @@ def resolve_config() -> AppConfig:
         raise HTTPException(status_code=500, detail="config.yaml 格式错误或无法读取") from exc
 
     # 环境变量优先；未设置时使用本地 YAML，最后才用默认值。
-    resolved = AppConfig(
-        api_key=(os.getenv("DEEPSEEK_API_KEY") or config.api_key).strip(),
-        model=os.getenv("DEEPSEEK_MODEL") or config.model,
-        base_url=os.getenv("DEEPSEEK_BASE_URL") or config.base_url,
-        auto_extract_memory=config.auto_extract_memory,
-        database_url=config.database_url,
-        tts_home=os.getenv("HIYORI_TTS_HOME") or config.tts_home,
-    )
+    resolved = config.model_copy(update={
+        "tts_home": os.getenv("HIYORI_TTS_HOME") or config.tts_home,
+    })
+    if config.provider == "local":
+        try:
+            url = urlsplit(config.local_base_url)
+            valid = (url.scheme == "http" and url.hostname in ("127.0.0.1", "localhost", "::1")
+                     and not url.username and not url.query and not url.fragment
+                     and url.path.rstrip("/") == "/v1" and 0 < (url.port or 80) <= 65535)
+        except ValueError:
+            valid = False
+        if not valid:
+            raise HTTPException(status_code=503, detail="本地模型地址必须是本机 HTTP 服务")
+        if not config.local_tokenizer_path or not Path(config.local_tokenizer_path).is_file():
+            raise HTTPException(status_code=503, detail="未找到本地模型 tokenizer.json")
+        if not config.local_model.strip() or not config.local_auxiliary_model.strip():
+            raise HTTPException(status_code=503, detail="请配置本地聊天与辅助模型名称")
+        return resolved.model_copy(update={"api_key": "local-ignored", "model": config.local_model,
+                                           "base_url": config.local_base_url})
+    resolved = resolved.model_copy(update={
+        "api_key": (os.getenv("DEEPSEEK_API_KEY") or config.api_key).strip(),
+        "model": os.getenv("DEEPSEEK_MODEL") or config.model,
+        "base_url": os.getenv("DEEPSEEK_BASE_URL") or config.base_url,
+    })
     if not resolved.api_key:
         raise HTTPException(status_code=503, detail="尚未配置 DeepSeek API Key")
     return resolved
+
+
+@app.get("/model-status")
+def model_status() -> dict:
+    config = resolve_config()
+    return {"provider": config.provider, "model": config.model,
+            "thinking_supported": not llm_runtime.is_local(config)}
 
 
 class ChatRequest(BaseModel):
@@ -297,11 +329,13 @@ def chat(body: ChatRequest, background_tasks: BackgroundTasks) -> ChatResponse:
     conversation_id, messages, memories, character_name = prepare_chat(body)
     result = None
     try:
-        with OpenAI(api_key=config.api_key, base_url=config.base_url,
-                    timeout=45, max_retries=0) as client:
+        with llm_runtime.gpu_session(config), OpenAI(api_key=config.api_key, base_url=config.base_url,
+                    timeout=180 if llm_runtime.is_local(config) else 45, max_retries=0,
+                    **llm_runtime.transport_options(config)) as client:
             for event, data in agent_service.run(
                 client, config.model, messages, conversation_id, character_name,
-                thinking_options(body.thinking), stream=False, tools_enabled=body.tools_enabled,
+                llm_runtime.local_options(config) if llm_runtime.is_local(config) else thinking_options(body.thinking),
+                stream=False, tools_enabled=body.tools_enabled, config=config,
             ):
                 if event == "complete":
                     result = data
@@ -338,11 +372,13 @@ def chat_stream(body: ChatRequest, background_tasks: BackgroundTasks) -> Streami
         })
         result = None
         try:
-            with OpenAI(api_key=config.api_key, base_url=config.base_url,
-                        timeout=45, max_retries=0) as client:
+            with llm_runtime.gpu_session(config), OpenAI(api_key=config.api_key, base_url=config.base_url,
+                        timeout=180 if llm_runtime.is_local(config) else 45, max_retries=0,
+                        **llm_runtime.transport_options(config)) as client:
                 for event, data in agent_service.run(
                     client, config.model, messages, conversation_id, character_name,
-                    thinking_options(body.thinking), stream=True, tools_enabled=body.tools_enabled,
+                    llm_runtime.local_options(config) if llm_runtime.is_local(config) else thinking_options(body.thinking),
+                    stream=True, tools_enabled=body.tools_enabled, config=config,
                 ):
                     if event == "complete":
                         result = data

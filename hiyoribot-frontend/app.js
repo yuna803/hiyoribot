@@ -569,8 +569,14 @@ $("#merge-memory-form").addEventListener("submit", async (event) => {
 
 async function initialize() {
   try {
+    const modelStatus = await api("/model-status");
+    if (!modelStatus.thinking_supported) {
+      thinkingEnabled.checked = false;
+      thinkingEnabled.closest("label").hidden = true;
+      $("footer .hint").textContent = "Enter 发送，Shift + Enter 换行 · 本地模型，工具调用记录可展开查看";
+    }
     const character = await api("/character");
-    $(".subtitle").textContent = `V0.9 · ${character.name}`;
+    $(".subtitle").textContent = `V0.9 · ${character.name} · ${modelStatus.provider === "local" ? "本地模型" : "DeepSeek"}`;
     const conversations = await refreshConversations();
     const chosen = conversations.find((item) => item.id === conversationId) || conversations[0];
     if (chosen) await loadHistory(chosen.id);

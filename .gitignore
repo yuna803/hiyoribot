@@ -2,6 +2,7 @@
 .idea/
 __pycache__/
 .pytest_cache/
+unsloth_compiled_cache/
 .venv/
 venv/
 agent_work/
@@ -21,3 +22,7 @@ config.yaml
 *.pth
 *.ckpt
 *.pt
+*.gguf
+*.safetensors
+*.bin
+*.vhdx

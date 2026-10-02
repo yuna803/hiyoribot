@@ -13,13 +13,16 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 from openai import APITimeoutError, OpenAI, OpenAIError
+import httpx
+
+import llm_runtime
 
 from tts_worker import MAX_AUDIO_SECONDS, MAX_TEXT_CHARS
 
 _lock = Lock()  # 单张显卡一次只运行一个合成进程。
 _log = logging.getLogger(__name__)
 _worker = Path(__file__).with_name("tts_worker.py")
-_pipeline_version = b"faithful-full-dialogue-v2\0"
+_pipeline_version = b"faithful-full-dialogue-v4\0"
 
 
 def _dataset(tts_home: str) -> tuple[Path, Path]:
@@ -55,22 +58,29 @@ def _translate_japanese(text: str, config) -> str:
         "请把每句话、每个段落完整翻译成日语，保持原顺序、原意、语气、人称、称呼与否定和疑问。"
         "不要摘要、删减、挑重点、补写台词，也不要根据角色设定改写剧情或替换说话人。"
         "说话人是和泉妃爱，对话者是哥哥和泉智宏；哥哥译为お兄ちゃん，妃爱译为妃愛。"
+        "妃爱是女性，第一人称用私；你指哥哥，不能交换我和你的身份。食物名称、动作和数量必须保留。"
+        "例如：哥哥，我给你买了咖啡。→お兄ちゃん、コーヒーを買ってきたよ。"
+        "例如：我给你留了一份炒饭。→お兄ちゃんの分のチャーハンを一人前取っておいたよ。"
         "已经是日语的台词原样保留。只输出完整日语译文，不加说明或前缀。"
     )
     try:
         with OpenAI(api_key=config.api_key, base_url=config.base_url,
-                    timeout=60, max_retries=0) as client:
+                    timeout=180 if llm_runtime.is_local(config) else 60, max_retries=0,
+                    **llm_runtime.transport_options(config)) as client:
             result = client.chat.completions.create(
-                model=config.model,
-                messages=[{"role": "system", "content": prompt},
-                          {"role": "user", "content": text}],
-                max_tokens=8192,
-                extra_body={"thinking": {"type": "disabled"}},
+                model=llm_runtime.auxiliary_model(config),
+                messages=llm_runtime.fit_messages(
+                    [{"role": "system", "content": prompt}, {"role": "user", "content": text}],
+                    config, output_tokens=2048),
+                **(llm_runtime.local_options(config, auxiliary=True) if llm_runtime.is_local(config)
+                   else {"max_tokens": 8192, "extra_body": {"thinking": {"type": "disabled"}}}),
             )
     except APITimeoutError as exc:
-        raise HTTPException(status_code=504, detail="DeepSeek 翻译超时，请稍后重试") from exc
+        raise HTTPException(status_code=504, detail="台词翻译超时，请稍后重试") from exc
     except OpenAIError as exc:
         raise HTTPException(status_code=502, detail="日语台词翻译失败") from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail="本地翻译上下文或分词器不可用") from exc
     choice = result.choices[0] if result.choices else None
     japanese = (choice.message.content or "").strip() if choice else ""
     if not japanese or len(japanese) > MAX_TEXT_CHARS or getattr(choice, "finish_reason", None) not in (None, "stop"):
@@ -117,11 +127,12 @@ def create_speech(text: str, config) -> dict[str, str]:
     home, dataset = _dataset(config.tts_home)
     selected = (dataset / "active_model.json").read_bytes()
     # 翻译规则变化时更新版本，避免命中旧的摘要配音；旧文件继续留在本机。
-    key = hashlib.sha256(_pipeline_version + selected + b"\0" + text.encode("utf-8")).hexdigest()
+    translation = f"{getattr(config, 'provider', 'deepseek')}:{getattr(config, 'base_url', '')}:{llm_runtime.auxiliary_model(config)}"
+    key = hashlib.sha256(_pipeline_version + selected + translation.encode() + b"\0" + text.encode("utf-8")).hexdigest()
     cache = dataset / "web_audio"
     audio = cache / f"{key}.wav"
     metadata = cache / f"{key}.json"
-    with _lock:
+    with llm_runtime.gpu_session(config), _lock:
         if audio.is_file() and metadata.is_file():
             japanese = json.loads(metadata.read_text(encoding="utf-8"))["japanese"]
         else:
@@ -129,6 +140,10 @@ def create_speech(text: str, config) -> dict[str, str]:
             cache.mkdir(exist_ok=True)
             temporary = cache / f"{key}.{uuid4().hex}.wav"
             try:
+                try:
+                    llm_runtime.unload_local_models(config)
+                except httpx.HTTPError as exc:
+                    raise HTTPException(status_code=503, detail="本地模型显存未释放，配音未启动") from exc
                 _synthesize(japanese, temporary, home)
                 os.replace(temporary, audio)
                 metadata.write_text(json.dumps({"source_text": source_text, "japanese": japanese}, ensure_ascii=False),

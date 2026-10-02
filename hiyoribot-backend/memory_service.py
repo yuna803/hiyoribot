@@ -8,6 +8,7 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 
 import storage
+import llm_runtime
 
 logger = logging.getLogger(__name__)
 EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
@@ -59,14 +60,17 @@ def recall(query: str) -> list[dict]:
 
 
 def extract_and_store(user_text: str, source_message_id: int, config) -> int:
-    with OpenAI(api_key=config.api_key, base_url=config.base_url) as client:
+    with llm_runtime.gpu_session(config), OpenAI(api_key=config.api_key, base_url=config.base_url,
+                                               timeout=120, max_retries=0,
+                                               **llm_runtime.transport_options(config)) as client:
         response = client.chat.completions.create(
-            model=config.model,
-            messages=[
+            model=llm_runtime.auxiliary_model(config),
+            messages=llm_runtime.fit_messages([
                 {"role": "system", "content": EXTRACTION_PROMPT},
                 {"role": "user", "content": user_text},
-            ],
+            ], config, output_tokens=2048),
             response_format={"type": "json_object"},
+            **llm_runtime.local_options(config, auxiliary=True),
         )
     content = response.choices[0].message.content if response.choices else None
     facts = ExtractedFacts.model_validate_json(content or '{}').facts

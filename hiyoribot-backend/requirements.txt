@@ -5,3 +5,4 @@ psycopg[binary]==3.3.6
 PyYAML==6.0.3
 uvicorn==0.46.0
 ddgs==9.16.0
+tokenizers==0.23.2

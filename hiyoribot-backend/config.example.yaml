@@ -1,5 +1,7 @@
 # 复制为 config.yaml 后可填写本地配置。config.yaml 已加入 .gitignore。
 api_key: ""
+# local 模式只请求本机 Ollama；不读取 DEEPSEEK_*，失败不会回退云端。
+provider: "deepseek"
 model: "deepseek-flash"
 base_url: "https://api.deepseek.com"
 # 每次成功聊天后再调用一次模型提取长期记忆；会增加一次模型请求。
@@ -8,3 +10,9 @@ auto_extract_memory: true
 database_url: ""
 # GPT-SoVITS 试训目录（包含 pilot_v1、env、GPT-SoVITS）；也可用 HIYORI_TTS_HOME。
 tts_home: ""
+# 本地角色模型；辅助模型用于提取记忆、忠实翻译，保留未微调的基础模型。
+local_model: "hiyori-base"
+local_auxiliary_model: "hiyori-base"
+local_base_url: "http://127.0.0.1:11434/v1"
+local_tokenizer_path: ""
+local_context_tokens: 8192

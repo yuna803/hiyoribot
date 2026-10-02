@@ -1,0 +1,9 @@
+# 独立 Ubuntu WSL2 Python 3.12 环境；不安装到网页或 TTS 的虚拟环境。
+torch==2.8.0
+torchvision==0.23.0
+xformers==0.0.32.post2
+unsloth==2026.9.14
+unsloth_zoo==2026.9.9
+transformers==4.56.2
+trl==0.22.2
+torchao==0.13.0

@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from uuid import UUID
 
 import agent_tools
+import llm_runtime
 
 MAX_TOOL_ROUNDS = 4
 MAX_TOOL_CALLS = 8
@@ -15,7 +16,12 @@ class AgentError(RuntimeError):
 
 
 def _model_round(client, model: str, messages: list[dict], options: dict,
-                 stream: bool, tool_choice: str | None) -> Iterator:
+                 stream: bool, tool_choice: str | None, config=None) -> Iterator:
+    if config is not None:
+        try:
+            messages = llm_runtime.fit_messages(messages, config, agent_tools.TOOLS if tool_choice else None)
+        except (OSError, ValueError) as exc:
+            raise AgentError("本地模型上下文或分词器不可用，请检查设定与模型文件") from exc
     arguments = {"model": model, "messages": list(messages), **options}
     if tool_choice is not None:
         arguments.update(tools=agent_tools.TOOLS, tool_choice=tool_choice)
@@ -93,7 +99,7 @@ def _model_round(client, model: str, messages: list[dict], options: dict,
 
 
 def run(client, model: str, messages: list[dict], conversation_id: UUID,
-        character_name: str, options: dict, *, stream: bool, tools_enabled: bool) -> Iterator:
+        character_name: str, options: dict, *, stream: bool, tools_enabled: bool, config=None) -> Iterator:
     context = [dict(message) for message in messages]
     if tools_enabled:
         context[0]["content"] += "\n\n" + agent_tools.TOOL_PROMPT
@@ -104,7 +110,7 @@ def run(client, model: str, messages: list[dict], conversation_id: UUID,
         final_only = round_number > MAX_TOOL_ROUNDS or calls_used >= MAX_TOOL_CALLS
         choice = ("none" if final_only else "auto") if tools_enabled else None
         yield "agent_round", {"round": round_number, "final_only": final_only}
-        message = yield from _model_round(client, model, context, options, stream, choice)
+        message = yield from _model_round(client, model, context, options, stream, choice, config)
         protocol.append(message)
         if message["reasoning_content"]:
             thoughts.append(message["reasoning_content"])
