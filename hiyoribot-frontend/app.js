@@ -6,6 +6,7 @@ const messages = $("#messages");
 const status = $("#status");
 const recallInfo = $("#recall-info");
 const thinkingEnabled = $("#thinking-enabled");
+const toolsEnabled = $("#tools-enabled");
 const conversationList = $("#conversation-list");
 const welcomeTemplate = $("#welcome").cloneNode(true);
 
@@ -15,6 +16,10 @@ let currentMemories = [];
 thinkingEnabled.checked = localStorage.getItem("hiyoriThinkingEnabled") !== "false";
 thinkingEnabled.addEventListener("change", () => {
   localStorage.setItem("hiyoriThinkingEnabled", String(thinkingEnabled.checked));
+});
+toolsEnabled.checked = localStorage.getItem("hiyoriToolsEnabled") !== "false";
+toolsEnabled.addEventListener("change", () => {
+  localStorage.setItem("hiyoriToolsEnabled", String(toolsEnabled.checked));
 });
 
 async function api(path, options = {}) {
@@ -106,6 +111,75 @@ function addReasoning(text = "") {
   return { box, summary, body };
 }
 
+const toolLabels = {
+  get_current_time: "查询当前时间",
+  search_user_memory: "查找长期记忆",
+  search_character_knowledge: "查找原作资料",
+  search_chat_history: "查找旧聊天",
+};
+
+function addToolLog() {
+  const box = document.createElement("details");
+  box.className = "reasoning-box tool-log";
+  box.hidden = true;
+  const summary = document.createElement("summary");
+  box.append(summary);
+  messages.append(box);
+  const rows = new Map();
+  return {
+    update(record) {
+      box.hidden = false;
+      box.open = true;
+      const key = `${record.round}:${record.id}`;
+      let row = rows.get(key);
+      if (!row) {
+        row = document.createElement("pre");
+        rows.set(key, row);
+        box.append(row);
+      }
+      const label = toolLabels[record.name] || record.name;
+      const state = !record.result ? "查询中" : record.result.error ? "失败" : record.cached ? "已复用" : "完成";
+      row.textContent = `第 ${record.round} 轮 · ${label} · ${state}\n参数：${JSON.stringify(record.arguments)}\n`
+        + (record.result ? `结果：${JSON.stringify(record.result, null, 2)}` : "");
+      summary.textContent = `工具调用（${rows.size} 次，展开查看）`;
+      messages.scrollTop = messages.scrollHeight;
+    },
+    finish(failed = false) {
+      if (box.hidden) box.remove();
+      else {
+        box.open = false;
+        summary.textContent = `工具调用（${rows.size} 次${failed ? "，本轮未保存" : ""}，展开查看）`;
+      }
+    },
+  };
+}
+
+function showSavedTools(protocol) {
+  if (!protocol?.some((item) => item.tool_calls?.length)) return;
+  const log = addToolLog();
+  const calls = new Map();
+  let round = 0;
+  for (const item of protocol) {
+    if (item.role === "assistant") {
+      round += 1;
+      for (const call of item.tool_calls || []) {
+        let argumentsValue;
+        try { argumentsValue = JSON.parse(call.function.arguments); }
+        catch { argumentsValue = call.function.arguments; }
+        const record = { id: call.id, name: call.function.name, arguments: argumentsValue, round };
+        calls.set(call.id, record);
+        log.update(record);
+      }
+    } else if (item.role === "tool" && calls.has(item.tool_call_id)) {
+      let result;
+      try { result = JSON.parse(item.content); }
+      catch { result = { text: item.content }; }
+      log.update({ ...calls.get(item.tool_call_id), result });
+    }
+  }
+  log.finish();
+}
+
 function showWelcome() {
   messages.replaceChildren(welcomeTemplate.cloneNode(true));
 }
@@ -140,6 +214,7 @@ async function loadHistory(id) {
     recallInfo.textContent = "发送新消息时会重新检索相关记忆。";
     messages.replaceChildren();
     for (const item of data.messages) {
+      if (item.role === "assistant") showSavedTools(item.agent_messages);
       if (item.role === "assistant" && item.reasoning) addReasoning(item.reasoning);
       const bubble = addBubble(item.role, item.content);
       if (item.role === "assistant") addSpeechControl(bubble, item.content);
@@ -215,6 +290,7 @@ form.addEventListener("submit", async (event) => {
   input.value = "";
   input.disabled = true;
   send.disabled = true;
+  const toolLog = addToolLog();
   const thought = addReasoning();
   thought.box.hidden = true;
   const pending = addBubble("assistant", "正在回复…", "pending");
@@ -225,7 +301,7 @@ form.addEventListener("submit", async (event) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message, conversation_id: conversationId,
-        thinking: thinkingEnabled.checked }),
+        thinking: thinkingEnabled.checked, tools_enabled: toolsEnabled.checked }),
     });
     if (!response.ok) {
       const failure = await response.json();
@@ -240,6 +316,18 @@ form.addEventListener("submit", async (event) => {
         recallInfo.textContent = recalled.length
           ? `本轮召回：${recalled.map((item) => item.content.slice(0, 40)).join("；")}`
           : "本轮未召回长期记忆。";
+      } else if (name === "agent_round" && data.round > 1) {
+        pending.textContent = `正在继续思考（第 ${data.round} 轮）…`;
+        pending.classList.add("pending");
+        received = false;
+        if (thought.body.textContent) thought.body.textContent += `\n\n—— 第 ${data.round} 轮 ——\n`;
+      } else if (name === "tool_start") {
+        toolLog.update(data);
+        pending.textContent = "正在查询资料…";
+        pending.classList.add("pending");
+        received = false;
+      } else if (name === "tool_result") {
+        toolLog.update(data);
       } else if (name === "reasoning_delta") {
         thought.box.hidden = false;
         thought.box.open = true;
@@ -255,6 +343,7 @@ form.addEventListener("submit", async (event) => {
         pending.textContent += data.text;
         messages.scrollTop = messages.scrollHeight;
       } else if (name === "done") {
+        toolLog.finish();
         if (thought.box.hidden) thought.box.remove();
         else thought.summary.textContent = "模型思考（展开/收起）";
         addSpeechControl(pending, pending.textContent);
@@ -265,6 +354,7 @@ form.addEventListener("submit", async (event) => {
       $("#chat-title").textContent = message.slice(0, 40);
     }
   } catch (error) {
+    toolLog.finish(true);
     if (received) {
       pending.textContent += "\n\n（回复中断，未保存这轮聊天）";
       if (!thought.box.hidden) thought.summary.textContent = "模型思考（本轮未保存）";
@@ -324,7 +414,7 @@ $("#character-form").addEventListener("submit", async (event) => {
         system_prompt: $("#system-prompt").value.trim(),
       }),
     });
-    $(".subtitle").textContent = `V0.8 · ${character.name}`;
+    $(".subtitle").textContent = `V0.9 · ${character.name}`;
     closeDialog("character-dialog");
   } catch (error) {
     showError(error, $("#character-status"));
@@ -448,7 +538,7 @@ $("#merge-memory-form").addEventListener("submit", async (event) => {
 async function initialize() {
   try {
     const character = await api("/character");
-    $(".subtitle").textContent = `V0.8 · ${character.name}`;
+    $(".subtitle").textContent = `V0.9 · ${character.name}`;
     const conversations = await refreshConversations();
     const chosen = conversations.find((item) => item.id === conversationId) || conversations[0];
     if (chosen) await loadHistory(chosen.id);

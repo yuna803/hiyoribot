@@ -1,8 +1,8 @@
-# HiyoriBot（V0.8）
+# HiyoriBot（V0.9）
 
 这是一个本地、单用户的 Python 聊天项目。后端在 `hiyoribot-backend/`，网页在 `hiyoribot-frontend/`，每次修改的简短记录见 [WORKLOG.md](WORKLOG.md)。
 
-当前范围到 V0.8；工具调用和模型自主决策留给 V0.9～V1.0。
+当前包含角色聊天、长短期记忆、模型主动工具查询和按需日语配音。
 
 ## 一条消息怎样运行
 
@@ -13,12 +13,12 @@
   ├─ 同一会话最近的消息（短期上下文）
   └─ pgvector 找到的相关用户长期记忆
        ↓
-     DeepSeek 流式回复 → 保存完整问答
+     DeepSeek → 按需调用查询工具 → 读取结果继续判断 → 流式回复 → 保存完整问答
        ↓
      后台再调用一次模型，提取稳定的用户事实 → 本地 embedding → pgvector
 ```
 
-完整聊天记录和给模型使用的上下文分开保存。短期上下文最多取最近 24 条消息，再按 12,000 字符预算裁剪；长期记忆按向量相似度先取 12 条候选，过滤后结合重要度选最多 5 条。借鉴了 SillyTavern 将角色设定、聊天历史和按需注入的信息分开处理的思路，未复制其代码。参考：[SillyTavern Prompt 文档](https://github.com/SillyTavern/SillyTavern-Docs/blob/main/Usage/Prompts/index.md)、[World Info 文档](https://github.com/SillyTavern/SillyTavern-Docs/blob/main/Usage/worldinfo.md)。
+完整聊天记录和给模型使用的上下文分开保存。短期上下文最多取最近 24 条消息，按完整问答及其工具消息做约 12,000 字符裁剪；最新一轮整体保留，可能略超预算。长期记忆按向量相似度先取 12 条候选，过滤后结合重要度选最多 5 条。借鉴了 SillyTavern 将角色设定、聊天历史和按需注入的信息分开处理的思路，未复制其代码。参考：[SillyTavern Prompt 文档](https://github.com/SillyTavern/SillyTavern-Docs/blob/main/Usage/Prompts/index.md)、[World Info 文档](https://github.com/SillyTavern/SillyTavern-Docs/blob/main/Usage/worldinfo.md)。
 
 原作角色资料与用户长期记忆使用不同的表。前者存角色经历、风格和剧情线索，按当前角色名和消息语义检索；后者只存用户事实。角色设定窗口会显示当前角色的资料条数。改变角色名称后，旧角色资料不会注入新角色的聊天。
 
@@ -85,6 +85,14 @@ $env:DEEPSEEK_API_KEY = Read-Host "DeepSeek API Key"
 ### 本地向量模型
 
 向量使用 FastEmbed 的 `BAAI/bge-small-zh-v1.5`，维度为 512。第一次提取或检索长期记忆时会下载约 90 MB 模型，之后使用本地缓存；这一步不调用 DeepSeek 的 embedding API。模型与维度见 [FastEmbed 官方列表](https://qdrant.github.io/fastembed/examples/Supported_Models/)。
+
+### 模型主动工具查询
+
+发送框下方默认勾选「允许查询工具」。模型可按需要调用四个只读工具：`get_current_time` 查询北京时间，`search_user_memory` 检索用户长期记忆，`search_character_knowledge` 检索当前角色的原作资料，`search_chat_history` 用关键词查当前会话的旧消息。已有上下文足够时可以直接回复；查询结果不足时可以换关键词继续查。
+
+每条消息最多 4 轮工具调用、8 次执行，然后再请求一次模型直接回复。相同查询在本轮内复用结果；参数错误和工具失败会交回模型处理。工具结果仅作参考资料，当前会话和角色范围由后端限定。查询循环见 `agent_service.py`，工具定义与执行见 `agent_tools.py`。
+
+页面用折叠区域展示每次调用的参数、结果与轮次，成功聊天后保存在 `message.agent_messages`；刷新旧会话也能查看。下一轮聊天会按完整协议回传这些工具消息与模型返回的 `reasoning_content`，符合 [DeepSeek 思考模式的工具调用要求](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)。思考开关和工具开关可以独立使用；多次调用会增加模型请求次数和等待时间。
 
 ### 日语 TTS 配音
 

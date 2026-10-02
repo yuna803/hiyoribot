@@ -77,7 +77,9 @@ class ChatApiTest(unittest.TestCase):
         self.assertEqual(completion.call_args.kwargs["messages"][-1],
                          {"role": "user", "content": "你好"})
         from storage import save_turn
-        save_turn.assert_called_once_with(self.conversation_id, "你好", "你好！", "")
+        save_turn.assert_called_once_with(self.conversation_id, "你好", "你好！", "",
+                                         agent_messages=[{"role": "assistant", "content": "你好！",
+                                                          "reasoning_content": ""}])
 
     def test_role_knowledge_recall_is_separate_from_user_memory(self) -> None:
         sample = {"kind": "style", "content": "妃爱工作时说话利落", "similarity": 0.75}
@@ -132,7 +134,9 @@ class ChatApiTest(unittest.TestCase):
         self.assertIn('event: error\ndata: {"message": "模型服务调用失败"}', failure.text)
         self.assertNotIn("secret upstream details", failure.text)
         from storage import save_turn
-        save_turn.assert_called_once_with(self.conversation_id, "你好", "你好", "先回应问候。")
+        save_turn.assert_called_once_with(self.conversation_id, "你好", "你好", "先回应问候。",
+                                         agent_messages=[{"role": "assistant", "content": "你好",
+                                                          "reasoning_content": "先回应问候。"}])
 
     def test_thinking_can_be_disabled(self) -> None:
         fake = SimpleNamespace(choices=[SimpleNamespace(
@@ -172,10 +176,12 @@ class ChatApiTest(unittest.TestCase):
             client.return_value.__enter__.return_value.chat.completions.create.return_value = fake
             with patch.dict(os.environ, {}, clear=True):
                 self.assertEqual(self.client.post("/chat", json={"message": "你好"}).status_code, 200)
-            client.assert_called_with(api_key="yaml-key", base_url="https://api.deepseek.com")
+            client.assert_called_with(api_key="yaml-key", base_url="https://api.deepseek.com",
+                                      timeout=45, max_retries=0)
             with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "env-key"}, clear=True):
                 self.assertEqual(self.client.post("/chat", json={"message": "你好"}).status_code, 200)
-            client.assert_called_with(api_key="env-key", base_url="https://api.deepseek.com")
+            client.assert_called_with(api_key="env-key", base_url="https://api.deepseek.com",
+                                      timeout=45, max_retries=0)
 
     def test_character_and_conversation_routes(self) -> None:
         character = {"id": 1, "name": "小日和", "system_prompt": "自然说话"}

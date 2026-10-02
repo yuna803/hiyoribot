@@ -1,4 +1,4 @@
-"""V0.8：角色聊天、会话历史、长期记忆和向量召回。"""
+"""V0.9：角色聊天、长期记忆与模型自主工具调用。"""
 
 import json
 import os
@@ -17,8 +17,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 import memory_service
 import storage
 import tts_service
+import agent_service
 
-app = FastAPI(title="Hiyori Bot", version="0.8.0")
+app = FastAPI(title="Hiyori Bot", version="0.9.0")
 CONFIG_PATH = Path(__file__).with_name("config.yaml")
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "hiyoribot-frontend"
 FRONTEND_INDEX = FRONTEND_DIR / "index.html"
@@ -69,6 +70,7 @@ class ChatRequest(BaseModel):
     message: str = Field(max_length=4000)
     conversation_id: UUID | None = None
     thinking: bool = True
+    tools_enabled: bool = True
 
     @field_validator("message")
     @classmethod
@@ -85,6 +87,7 @@ class ChatResponse(BaseModel):
     reasoning: str | None = None
     conversation_id: UUID
     recalled_memory_ids: list[int]
+    tool_calls: list[dict] = Field(default_factory=list)
 
 
 class SpeechRequest(BaseModel):
@@ -162,7 +165,7 @@ def build_model_messages(
     character: dict, memories: list[dict], history: list[dict], user_text: str,
     role_knowledge: list[dict] | None = None,
     game_dialogue: list[dict] | None = None,
-) -> list[dict[str, str]]:
+) -> list[dict]:
     character_parts = [
         f"你现在以角色“{character['name']}”身份交流。",
         character["system_prompt"],
@@ -206,21 +209,36 @@ def build_model_messages(
             "如果与用户当前说法冲突，以当前说法为准：\n" + facts,
         })
 
-    # ponytail: 暂用字符预算裁剪；需要精确成本控制时再换成模型 token 计数。
+    # 按完整问答裁剪，避免留下没有对应 assistant 请求的 tool 消息。
+    turns = []
+    for item in history:
+        if item["role"] == "user" or not turns:
+            turns.append([])
+        if item["role"] == "assistant" and item.get("agent_messages"):
+            turns[-1].extend(item["agent_messages"])
+        else:
+            message = {"role": item["role"], "content": item["content"]}
+            if item["role"] == "assistant":
+                message["reasoning_content"] = item.get("reasoning") or ""
+            turns[-1].append(message)
+    # ponytail: 字符预算近似 token；最新一轮整体保留，可略超预算。
     budget = 12_000
     selected = []
-    for item in reversed(history):
+    for turn in reversed(turns):
+        size = len(json.dumps(turn, ensure_ascii=False))
+        if selected and size > budget:
+            break
+        selected.append(turn)
+        budget -= size
         if budget <= 0:
             break
-        content = item["content"][-budget:]
-        selected.append({"role": item["role"], "content": content})
-        budget -= len(content)
-    messages.extend(reversed(selected))
+    for turn in reversed(selected):
+        messages.extend(turn)
     messages.append({"role": "user", "content": user_text})
     return messages
 
 
-def prepare_chat(body: ChatRequest) -> tuple[UUID, list[dict[str, str]], list[dict]]:
+def prepare_chat(body: ChatRequest) -> tuple[UUID, list[dict], list[dict], str]:
     character = storage.get_character()
     try:
         memories = memory_service.recall(body.message)
@@ -257,7 +275,7 @@ def prepare_chat(body: ChatRequest) -> tuple[UUID, list[dict[str, str]], list[di
     messages = build_model_messages(
         character, memories, history, body.message, role_knowledge, game_dialogue
     )
-    return conversation["id"], messages, memories
+    return conversation["id"], messages, memories, character["name"]
 
 
 def sse_event(name: str, data: dict[str, object]) -> str:
@@ -276,36 +294,40 @@ def thinking_options(enabled: bool) -> dict:
 @app.post("/chat", response_model=ChatResponse)
 def chat(body: ChatRequest, background_tasks: BackgroundTasks) -> ChatResponse:
     config = resolve_config()
-    conversation_id, messages, memories = prepare_chat(body)
-
+    conversation_id, messages, memories, character_name = prepare_chat(body)
+    result = None
     try:
-        with OpenAI(api_key=config.api_key, base_url=config.base_url) as client:
-            result = client.chat.completions.create(
-                model=config.model, messages=messages, **thinking_options(body.thinking)
-            )
+        with OpenAI(api_key=config.api_key, base_url=config.base_url,
+                    timeout=45, max_retries=0) as client:
+            for event, data in agent_service.run(
+                client, config.model, messages, conversation_id, character_name,
+                thinking_options(body.thinking), stream=False, tools_enabled=body.tools_enabled,
+            ):
+                if event == "complete":
+                    result = data
     except OpenAIError as exc:
         raise HTTPException(status_code=502, detail="模型服务调用失败") from exc
-
-    choice = result.choices[0] if result.choices else None
-    reply = choice.message.content if choice else None
-    if not reply or getattr(choice, "finish_reason", None) not in (None, "stop"):
+    except agent_service.AgentError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if result is None:
         raise HTTPException(status_code=502, detail="模型回复不完整，未保存这轮聊天")
-    reasoning = (getattr(choice.message, "reasoning_content", None) or "") if choice else ""
-    source_id = storage.save_turn(conversation_id, body.message, reply, reasoning)
+    source_id = storage.save_turn(conversation_id, body.message, result["reply"], result["reasoning"],
+                                  agent_messages=result["agent_messages"])
     if config.auto_extract_memory:
         background_tasks.add_task(memory_service.extract_safely, body.message, source_id, config)
     return ChatResponse(
-        reply=reply,
-        reasoning=reasoning or None,
+        reply=result["reply"],
+        reasoning=result["reasoning"] or None,
         conversation_id=conversation_id,
         recalled_memory_ids=[item["id"] for item in memories],
+        tool_calls=result["tool_calls"],
     )
 
 
 @app.post("/chat/stream")
 def chat_stream(body: ChatRequest, background_tasks: BackgroundTasks) -> StreamingResponse:
     config = resolve_config()
-    conversation_id, messages, memories = prepare_chat(body)
+    conversation_id, messages, memories, character_name = prepare_chat(body)
 
     def events() -> Iterator[str]:
         yield sse_event("meta", {
@@ -314,38 +336,31 @@ def chat_stream(body: ChatRequest, background_tasks: BackgroundTasks) -> Streami
                 {"id": item["id"], "content": item["content"]} for item in memories
             ],
         })
-        parts = []
-        reasoning_parts = []
-        finish_reason = None
+        result = None
         try:
-            with OpenAI(api_key=config.api_key, base_url=config.base_url) as client:
-                stream = client.chat.completions.create(
-                    model=config.model, messages=messages, stream=True,
-                    **thinking_options(body.thinking),
-                )
-                for chunk in stream:
-                    if not chunk.choices:
-                        continue
-                    choice = chunk.choices[0]
-                    finish_reason = getattr(choice, "finish_reason", None) or finish_reason
-                    reasoning = getattr(choice.delta, "reasoning_content", None)
-                    if reasoning:
-                        reasoning_parts.append(reasoning)
-                        yield sse_event("reasoning_delta", {"text": reasoning})
-                    content = choice.delta.content
-                    if content:
-                        parts.append(content)
-                        yield sse_event("delta", {"text": content})
+            with OpenAI(api_key=config.api_key, base_url=config.base_url,
+                        timeout=45, max_retries=0) as client:
+                for event, data in agent_service.run(
+                    client, config.model, messages, conversation_id, character_name,
+                    thinking_options(body.thinking), stream=True, tools_enabled=body.tools_enabled,
+                ):
+                    if event == "complete":
+                        result = data
+                    else:
+                        yield sse_event(event, data)
         except OpenAIError:
             yield sse_event("error", {"message": "模型服务调用失败"})
             return
-
-        if not parts or finish_reason not in (None, "stop"):
+        except agent_service.AgentError as exc:
+            yield sse_event("error", {"message": str(exc)})
+            return
+        if result is None:
             yield sse_event("error", {"message": "模型回复不完整，未保存这轮聊天"})
             return
         try:
             source_id = storage.save_turn(
-                conversation_id, body.message, "".join(parts), "".join(reasoning_parts)
+                conversation_id, body.message, result["reply"], result["reasoning"],
+                agent_messages=result["agent_messages"],
             )
         except psycopg.Error:
             yield sse_event("error", {"message": "聊天记录保存失败"})

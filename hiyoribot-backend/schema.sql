@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS message (
 );
 
 ALTER TABLE message ADD COLUMN IF NOT EXISTS reasoning text;
+-- 保存本轮模型工具消息，供下次聊天回传和网页查看调用记录。
+ALTER TABLE message ADD COLUMN IF NOT EXISTS agent_messages jsonb;
 
 CREATE INDEX IF NOT EXISTS message_conversation_idx ON message (conversation_id, id DESC);
 

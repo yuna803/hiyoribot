@@ -16,8 +16,15 @@ class DatabaseIntegrationTest(unittest.TestCase):
         try:
             conversation = storage.create_conversation(marker)
             conversation_id = conversation["id"]
-            source_id = storage.save_turn(conversation_id, marker, "test reply")
-            self.assertEqual(len(storage.list_messages(conversation_id)), 2)
+            protocol = [{"role": "assistant", "content": "test reply", "reasoning_content": "test reasoning"}]
+            source_id = storage.save_turn(conversation_id, marker + "%_", "test reply",
+                                          "test reasoning", agent_messages=protocol)
+            saved = storage.list_messages(conversation_id)
+            self.assertEqual(len(saved), 2)
+            self.assertEqual(saved[1]["agent_messages"], protocol)
+            self.assertEqual(storage.recent_messages(conversation_id)[1]["agent_messages"], protocol)
+            self.assertEqual(storage.search_chat_history(conversation_id, marker + "%_")[0]["id"], source_id)
+            self.assertEqual(storage.search_chat_history(uuid4(), marker), [])
 
             first_vector = [1.0] + [0.0] * 511
             second_vector = [0.0, 1.0] + [0.0] * 510

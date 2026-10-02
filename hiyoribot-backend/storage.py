@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 import psycopg
 import yaml
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 CONFIG_PATH = Path(__file__).with_name("config.yaml")
@@ -108,7 +109,7 @@ def list_conversations() -> list[dict]:
 def list_messages(conversation_id: UUID) -> list[dict]:
     with connect() as conn:
         return conn.execute(
-            """SELECT id, role, content, reasoning, created_at FROM message
+            """SELECT id, role, content, reasoning, agent_messages, created_at FROM message
                WHERE conversation_id = %s ORDER BY id""",
             (conversation_id,),
         ).fetchall()
@@ -117,15 +118,28 @@ def list_messages(conversation_id: UUID) -> list[dict]:
 def recent_messages(conversation_id: UUID, limit: int = 20) -> list[dict]:
     with connect() as conn:
         rows = conn.execute(
-            """SELECT role, content FROM message WHERE conversation_id = %s
+            """SELECT role, content, reasoning, agent_messages FROM message WHERE conversation_id = %s
                ORDER BY id DESC LIMIT %s""",
             (conversation_id, limit),
         ).fetchall()
     return list(reversed(rows))
 
 
+def search_chat_history(conversation_id: UUID, query: str, limit: int = 6) -> list[dict]:
+    # 参数化查询且把 LIKE 通配符转义，仅查当前会话的字面关键词。
+    pattern = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT id, role, content FROM message
+               WHERE conversation_id = %s AND content ILIKE %s
+               ORDER BY id DESC LIMIT %s""", (conversation_id, pattern, limit),
+        ).fetchall()
+    return list(reversed(rows))
+
+
 def save_turn(
-    conversation_id: UUID, user_text: str, assistant_text: str, reasoning: str = ""
+    conversation_id: UUID, user_text: str, assistant_text: str, reasoning: str = "",
+    agent_messages: list[dict] | None = None,
 ) -> int:
     # 两条消息在同一事务中写入，不留下半轮成功记录。
     with connect() as conn:
@@ -135,9 +149,10 @@ def save_turn(
             (conversation_id, user_text),
         ).fetchone()
         conn.execute(
-            """INSERT INTO message (conversation_id, role, content, reasoning)
-               VALUES (%s, 'assistant', %s, %s)""",
-            (conversation_id, assistant_text, reasoning or None),
+            """INSERT INTO message (conversation_id, role, content, reasoning, agent_messages)
+               VALUES (%s, 'assistant', %s, %s, %s)""",
+            (conversation_id, assistant_text, reasoning or None,
+             Jsonb(agent_messages) if agent_messages else None),
         )
         conn.execute(
             "UPDATE conversation SET updated_at = now() WHERE id = %s",

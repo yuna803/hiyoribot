@@ -25,7 +25,7 @@
         <header>
           <div>
             <h1 id="chat-title">新对话</h1>
-            <p class="subtitle">V0.8 · 角色、会话与长期记忆</p>
+            <p class="subtitle">V0.9 · 角色、记忆与工具查询</p>
             <p id="recall-info" class="recall-info">每轮会带上最近消息，并按需召回长期记忆。</p>
           </div>
         </header>
@@ -45,6 +45,9 @@
           </form>
           <label class="thinking-toggle" for="thinking-enabled">
             <input id="thinking-enabled" type="checkbox" checked /> 显示模型思考
+          </label>
+          <label class="thinking-toggle" for="tools-enabled">
+            <input id="tools-enabled" type="checkbox" checked /> 允许查询工具
           </label>
           <p id="status" role="alert" hidden></p>
           <p class="hint">Enter 发送，Shift + Enter 换行 · 思考内容会与回复分开保存</p>
