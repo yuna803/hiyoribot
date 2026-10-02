@@ -58,7 +58,15 @@ function addSpeechControl(bubble, text) {
   button.type = "button";
   button.className = "secondary";
   button.textContent = "▶ 妃爱配音";
-  button.title = "提取台词并译成日语，再用本机模型配音";
+  button.title = "将全部台词按原意译成日语，再用本机模型配音";
+  const sourceDetails = document.createElement("details");
+  sourceDetails.className = "speech-source";
+  sourceDetails.hidden = true;
+  const sourceSummary = document.createElement("summary");
+  sourceSummary.textContent = "查看中文配音原文";
+  const sourceCaption = document.createElement("small");
+  sourceCaption.className = "speech-caption";
+  sourceDetails.append(sourceSummary, sourceCaption);
   const caption = document.createElement("small");
   caption.className = "speech-caption";
   const audio = document.createElement("audio");
@@ -82,6 +90,8 @@ function addSpeechControl(bubble, text) {
         body: JSON.stringify({ text }),
       });
       if (!bubble.isConnected) return;
+      sourceCaption.textContent = data.source_text;
+      sourceDetails.hidden = false;
       caption.textContent = `日语台词：${data.japanese}`;
       audio.src = data.audio_url;
       audio.hidden = false;
@@ -94,7 +104,7 @@ function addSpeechControl(bubble, text) {
       button.disabled = false;
     }
   });
-  controls.append(button, caption, audio);
+  controls.append(button, sourceDetails, caption, audio);
   bubble.append(controls);
 }
 

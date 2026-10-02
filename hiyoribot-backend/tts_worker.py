@@ -6,9 +6,27 @@ import os
 import sys
 from pathlib import Path
 
+MAX_TEXT_CHARS = 8000
+MAX_AUDIO_SECONDS = 1800
+
+
+def split_japanese_text(text: str, limit: int = 160) -> list[str]:
+    """尽量在句末分段，单句过长也按长度拆开，避免模型提前结束。"""
+    chunks, start = [], 0
+    while start < len(text):
+        end = min(start + limit, len(text))
+        if end < len(text):
+            boundary = max(text.rfind(mark, start, end) for mark in "。！？!?\n")
+            if boundary >= start:
+                end = boundary + 1
+        chunk = text[start:end]
+        if chunk.strip():
+            chunks.append(chunk)
+        start = end
+    return chunks
 
 def generate(home: Path, output: Path, text: str) -> None:
-    if not text or len(text) > 180:
+    if not text or len(text) > MAX_TEXT_CHARS:
         raise ValueError("日语台词为空或过长")
     root = home / "GPT-SoVITS"
     dataset = home / "pilot_v1"
@@ -35,16 +53,27 @@ def generate(home: Path, output: Path, text: str) -> None:
         "cnhuhbert_base_path": str(models / "chinese-hubert-base"),
     }})
     tts = TTS(config)
-    pieces = list(tts.run({
-        "text": text, "text_lang": "all_ja", "ref_audio_path": reference["wav"],
-        "prompt_text": reference["text"], "prompt_lang": "all_ja", "seed": 42,
-        "parallel_infer": False, "batch_size": 1, "text_split_method": "cut5",
-    }))
-    if not pieces:
+    rate, frames, arrays = None, 0, []
+    for chunk in split_japanese_text(text):
+        pieces = list(tts.run({
+            "text": chunk, "text_lang": "all_ja", "ref_audio_path": reference["wav"],
+            "prompt_text": reference["text"], "prompt_lang": "all_ja", "seed": 42,
+            "parallel_infer": False, "batch_size": 1, "text_split_method": "cut5",
+        }))
+        if not pieces:
+            raise RuntimeError("某段台词没有生成语音")
+        for sample_rate, piece in pieces:
+            rate = sample_rate if rate is None else rate
+            if sample_rate != rate or not np.any(piece):
+                raise RuntimeError("某段配音格式不一致或全静音")
+            frames += len(piece)
+            if frames / rate > MAX_AUDIO_SECONDS:
+                raise RuntimeError("生成语音时长超出限制")
+            arrays.append(piece)
+    if not arrays:
         raise RuntimeError("没有生成语音")
-    rate = pieces[0][0]
-    audio = np.concatenate([piece for _, piece in pieces])
-    if not 0.3 <= len(audio) / rate <= 90 or not np.any(audio):
+    audio = np.concatenate(arrays)
+    if not 0.3 <= len(audio) / rate <= MAX_AUDIO_SECONDS:
         raise RuntimeError("生成语音为空或时长异常")
     sf.write(output, audio, rate, subtype="PCM_16")
 
