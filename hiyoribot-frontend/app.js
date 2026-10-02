@@ -116,6 +116,7 @@ const toolLabels = {
   search_user_memory: "查找长期记忆",
   search_character_knowledge: "查找原作资料",
   search_chat_history: "查找旧聊天",
+  search_web: "联网搜索",
 };
 
 function addToolLog() {
@@ -133,14 +134,35 @@ function addToolLog() {
       const key = `${record.round}:${record.id}`;
       let row = rows.get(key);
       if (!row) {
-        row = document.createElement("pre");
+        row = document.createElement("div");
+        const body = document.createElement("pre");
+        const sources = document.createElement("div");
+        sources.className = "tool-sources";
+        row.append(body, sources);
         rows.set(key, row);
         box.append(row);
       }
       const label = toolLabels[record.name] || record.name;
       const state = !record.result ? "查询中" : record.result.error ? "失败" : record.cached ? "已复用" : "完成";
-      row.textContent = `第 ${record.round} 轮 · ${label} · ${state}\n参数：${JSON.stringify(record.arguments)}\n`
+      row.querySelector("pre").textContent = `第 ${record.round} 轮 · ${label} · ${state}\n参数：${JSON.stringify(record.arguments)}\n`
         + (record.result ? `结果：${JSON.stringify(record.result, null, 2)}` : "");
+      const sources = row.querySelector(".tool-sources");
+      sources.replaceChildren();
+      if (record.name === "search_web") {
+        for (const source of record.result?.results || []) {
+          try {
+            const url = new URL(source.url);
+            if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) continue;
+            const link = document.createElement("a");
+            link.href = url.href;
+            link.textContent = source.title || url.hostname;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            sources.append(link);
+          } catch { /* 忽略无效来源链接。 */ }
+        }
+      }
+      sources.hidden = sources.childElementCount === 0;
       summary.textContent = `工具调用（${rows.size} 次，展开查看）`;
       messages.scrollTop = messages.scrollHeight;
     },

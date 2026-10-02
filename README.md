@@ -88,11 +88,13 @@ $env:DEEPSEEK_API_KEY = Read-Host "DeepSeek API Key"
 
 ### 模型主动工具查询
 
-发送框下方默认勾选「允许查询工具」。模型可按需要调用四个只读工具：`get_current_time` 查询北京时间，`search_user_memory` 检索用户长期记忆，`search_character_knowledge` 检索当前角色的原作资料，`search_chat_history` 用关键词查当前会话的旧消息。已有上下文足够时可以直接回复；查询结果不足时可以换关键词继续查。
+发送框下方默认勾选「允许查询工具」。模型可按需要调用五个只读工具：`get_current_time` 查询北京时间，`search_user_memory` 检索用户长期记忆，`search_character_knowledge` 检索当前角色的原作资料，`search_chat_history` 用关键词查当前会话的旧消息，`search_web` 联网搜索公开信息。已有上下文足够时可以直接回复；查询结果不足时可以换关键词继续查。
 
 每条消息最多 4 轮工具调用、8 次执行，然后再请求一次模型直接回复。相同查询在本轮内复用结果；参数错误和工具失败会交回模型处理。工具结果仅作参考资料，当前会话和角色范围由后端限定。查询循环见 `agent_service.py`，工具定义与执行见 `agent_tools.py`。
 
 页面用折叠区域展示每次调用的参数、结果与轮次，成功聊天后保存在 `message.agent_messages`；刷新旧会话也能查看。下一轮聊天会按完整协议回传这些工具消息与模型返回的 `reasoning_content`，符合 [DeepSeek 思考模式的工具调用要求](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)。思考开关和工具开关可以独立使用；多次调用会增加模型请求次数和等待时间。
+
+联网搜索使用 [DDGS](https://github.com/deedy5/ddgs) 的 Bing 后端，无需新增 API Key。每次最多取 5 条标题、摘要与链接，支持 `timelimit` 最近一天 `d`、一周 `w`、一月 `m`、一年 `y`。网页调用记录中的来源可点击；返回的是搜索摘要，不是网页全文，检索时间也不等于发布时间。查询只发送模型选出的公开关键词，搜索失败会作为工具错误交回模型处理。需要代理时可在启动后端的终端设置 `DDGS_PROXY` 环境变量，地址填自己的本机代理。
 
 ### 日语 TTS 配音
 

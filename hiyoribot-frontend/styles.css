@@ -112,6 +112,9 @@ h1 { margin: 0; font-size: 19px; }
 .reasoning-text { margin-top: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .tool-log { width: min(78%, 620px); }
 .tool-log pre { margin: 12px 0 0; max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; font-size: 12px; line-height: 1.6; }
+.tool-sources { display: grid; gap: 5px; margin-top: 8px; }
+.tool-sources[hidden] { display: none; }
+.tool-sources a { color: #5c53bc; overflow-wrap: anywhere; }
 .thinking-toggle { display: inline-flex; align-items: center; gap: 6px; margin-top: 9px; color: #69748c; font-size: 12px; }
 .thinking-toggle input { width: 16px; height: 16px; margin: 0; }
 
