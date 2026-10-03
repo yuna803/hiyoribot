@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 import memory_service
 import storage
 import web_search
+import story_service
 
 
 class EmptyArguments(BaseModel):
@@ -80,13 +81,20 @@ def execute(name: str, arguments: str, conversation_id: UUID, character_name: st
         if not has_notes and not has_dialogue:
             return {"character": character_name, "notes": [], "dialogue": []}
         embedding = memory_service.embed(parsed.query)
-        notes = storage.recall_role_knowledge(embedding, character_name, limit=3) if has_notes else []
-        dialogue = storage.recall_game_dialogue(embedding, limit=2) if has_dialogue else []
+        if character_name == "和泉妃爱":
+            conversation = storage.get_conversation(conversation_id)
+            if conversation is None:
+                return {"error": "当前会话不存在，无法确认剧情进度。"}
+            notes, dialogue = story_service.recall(
+                embedding, character_name, conversation.get("story_progress"), notes_limit=3)
+        else:
+            notes = storage.recall_role_knowledge(embedding, character_name, limit=3) if has_notes else []
+            dialogue = []
         return {"character": character_name,
                 "notes": [{"source": row["source_key"], "content": row["content"][:400]}
                           for row in notes if float(row["similarity"]) >= 0.5],
                 "dialogue": [{"script": row["script_name"], "entry": row["first_entry"],
-                              "content": row["content"][:700]}
+                              "last_entry": row["last_entry"], "content": row["content"]}
                              for row in dialogue if float(row["similarity"]) >= 0.4]}
-    except (psycopg.Error, RuntimeError):
+    except (psycopg.Error, RuntimeError, ValueError):
         return {"error": "本地数据库或检索模型暂时不可用；不要把查询失败当成没有记忆。"}

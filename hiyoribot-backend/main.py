@@ -21,6 +21,7 @@ import storage
 import tts_service
 import agent_service
 import llm_runtime
+import story_service
 
 app = FastAPI(title="Hiyori Bot", version="0.9.0")
 CONFIG_PATH = Path(__file__).with_name("config.yaml")
@@ -103,6 +104,7 @@ class ChatRequest(BaseModel):
     conversation_id: UUID | None = None
     thinking: bool = True
     tools_enabled: bool = True
+    story_progress: story_service.StoryProgress | None = None
 
     @field_validator("message")
     @classmethod
@@ -197,6 +199,7 @@ def build_model_messages(
     character: dict, memories: list[dict], history: list[dict], user_text: str,
     role_knowledge: list[dict] | None = None,
     game_dialogue: list[dict] | None = None,
+    story_progress: dict | None = None,
 ) -> list[dict]:
     character_parts = [
         f"你现在以角色“{character['name']}”身份交流。",
@@ -214,6 +217,8 @@ def build_model_messages(
         "role": "system",
         "content": "\n".join(character_parts),
     }]
+    if character["name"] == "和泉妃爱":
+        messages[0]["content"] += "\n\n" + story_service.prompt(story_progress)
     if role_knowledge:
         notes = "\n".join(f"- {item['content'].replace(chr(10), ' ')}" for item in role_knowledge)
         messages.append({
@@ -272,6 +277,24 @@ def build_model_messages(
 
 def prepare_chat(body: ChatRequest) -> tuple[UUID, list[dict], list[dict], str]:
     character = storage.get_character()
+    if body.conversation_id:
+        conversation = storage.get_conversation(body.conversation_id)
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        if body.story_progress is not None:
+            raise HTTPException(status_code=422, detail="已有会话请通过剧情进度窗口保存设定")
+    else:
+        progress = body.story_progress
+        if progress is not None:
+            try:
+                chapters, edges = storage.story_graph()
+                state = story_service.validate_progress(progress, chapters, edges)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            conversation = storage.create_conversation(body.message, state)
+        else:
+            conversation = storage.create_conversation(body.message)
+    progress = conversation.get("story_progress")
     try:
         memories = memory_service.recall(body.message)
         role_knowledge = []
@@ -282,30 +305,24 @@ def prepare_chat(body: ChatRequest) -> tuple[UUID, list[dict], list[dict], str]:
         )
         if has_role_knowledge or has_game_dialogue:
             query_embedding = memory_service.embed(body.message)
-        if has_role_knowledge:
+        if character["name"] == "和泉妃爱" and (has_role_knowledge or has_game_dialogue):
+            role_knowledge, game_dialogue = story_service.recall(
+                query_embedding, character["name"], progress)
+        elif has_role_knowledge:
             candidates = storage.recall_role_knowledge(
                 query_embedding, character["name"], limit=8
             )
             role_knowledge = [
                 row for row in candidates if float(row["similarity"]) >= 0.5
             ][:4]
-        if has_game_dialogue:
-            candidates = storage.recall_game_dialogue(query_embedding, limit=6)
-            game_dialogue = [
-                row for row in candidates if float(row["similarity"]) >= 0.4
-            ][:2]
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="剧情进度失效，请重新保存本会话进度") from exc
 
-    if body.conversation_id:
-        conversation = storage.get_conversation(body.conversation_id)
-        if conversation is None:
-            raise HTTPException(status_code=404, detail="会话不存在")
-    else:
-        conversation = storage.create_conversation(body.message)
     history = storage.recent_messages(conversation["id"], limit=24)
     messages = build_model_messages(
-        character, memories, history, body.message, role_knowledge, game_dialogue
+        character, memories, history, body.message, role_knowledge, game_dialogue, progress
     )
     return conversation["id"], messages, memories, character["name"]
 
@@ -444,6 +461,35 @@ def update_character(body: CharacterUpdate) -> dict:
 @app.get("/conversations")
 def list_conversations() -> list[dict]:
     return storage.list_conversations()
+
+
+@app.get("/story/timeline")
+def get_story_timeline() -> dict:
+    return story_service.timeline()
+
+
+@app.post("/story/validate-progress")
+def validate_story_progress(body: story_service.StoryProgress) -> dict:
+    chapters, edges = storage.story_graph()
+    try:
+        return story_service.validate_progress(body, chapters, edges)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.put("/conversations/{conversation_id}/story-progress")
+def set_story_progress(conversation_id: UUID, body: story_service.StoryProgress) -> dict:
+    if storage.get_conversation(conversation_id) is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    chapters, edges = storage.story_graph()
+    try:
+        state = story_service.validate_progress(body, chapters, edges)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    updated = storage.update_story_progress(conversation_id, state)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return updated
 
 
 @app.get("/conversations/{conversation_id}/messages")

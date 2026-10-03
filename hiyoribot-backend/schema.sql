@@ -36,6 +36,25 @@ CREATE TABLE IF NOT EXISTS message (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- 会话进度不跟随全局角色卡变化；旧会话默认未设置，检索采取保守边界。
+ALTER TABLE conversation ADD COLUMN IF NOT EXISTS story_progress jsonb;
+
+CREATE TABLE IF NOT EXISTS story_chapter (
+    script_name text PRIMARY KEY,
+    scope text NOT NULL CHECK (scope IN ('common', 'hiyori')),
+    max_entry integer NOT NULL CHECK (max_entry >= 0),
+    source_hash text NOT NULL
+);
+CREATE TABLE IF NOT EXISTS story_edge (
+    source_script text NOT NULL REFERENCES story_chapter(script_name),
+    source_entry integer NOT NULL,
+    target_script text NOT NULL REFERENCES story_chapter(script_name),
+    condition text NOT NULL DEFAULT '',
+    via text NOT NULL DEFAULT '',
+    PRIMARY KEY (source_script, source_entry, target_script, condition, via)
+);
+ALTER TABLE story_chapter ADD COLUMN IF NOT EXISTS uncertain_from integer;
+
 ALTER TABLE message ADD COLUMN IF NOT EXISTS reasoning text;
 -- 保存本轮模型工具消息，供下次聊天回传和网页查看调用记录。
 ALTER TABLE message ADD COLUMN IF NOT EXISTS agent_messages jsonb;

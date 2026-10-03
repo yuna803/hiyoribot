@@ -216,6 +216,102 @@ function showWelcome() {
   messages.replaceChildren(welcomeTemplate.cloneNode(true));
 }
 
+const emptyStoryProgress = () => ({ route: "common", script_name: null, entry_no: 0,
+  completed_scripts: [], relationship: "兄妹", scene: "" });
+let storyProgress = emptyStoryProgress();
+let storyChapters = [];
+let storyEditingConversation = null;
+
+function showStoryProgress() {
+  $("#story-progress-label").textContent = storyProgress.script_name
+    ? `${storyProgress.route === "common" ? "共通线" : "妃爱线"} · ${storyProgress.script_name} #${storyProgress.entry_no} · ${storyProgress.relationship}`
+    : "剧情进度未设置，暂不召回原作剧情。";
+}
+
+function renderStoryChapter(remembered = null) {
+  const selected = storyChapters.find((item) => item.script_name === $("#story-chapter").value);
+  const entry = $("#story-entry");
+  entry.max = selected?.max_entry ?? 0;
+  entry.value = Math.min(Number(entry.value) || 0, Number(entry.max));
+  const branches = $("#story-branches");
+  const checked = new Set(remembered ?? [...branches.querySelectorAll("input:checked")].map((item) => item.value));
+  branches.replaceChildren();
+  $("#story-boundary-info").textContent = !selected
+    ? "未设置进度时不召回原作片段或剧情摘要。"
+    : selected.linked
+      ? `本章序号范围 0～${selected.max_entry}；必经前置按实际跳转确定。可选分支只在下方确认后加入记忆。`
+      : `这是未与主线连接的独立场景；前置顺序不能自动确认，请只勾选已经经历的章节。序号范围 0～${selected.max_entry}。`;
+  if (selected?.uncertain_from != null) {
+    $("#story-boundary-info").textContent += ` 本章内部选择尚未核对，#${selected.uncertain_from} 及之后暂不召回。`;
+  }
+  const optional = selected?.linked ? selected.optional_predecessors : storyChapters
+    .filter((item) => item.script_name !== selected?.script_name &&
+      ($("#story-route").value === "hiyori" || item.scope === "common"))
+    .map((item) => item.script_name);
+  for (const name of selected ? optional : []) {
+    const label = document.createElement("label");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = name;
+    checkbox.checked = checked.has(name);
+    label.append(checkbox, document.createTextNode(name));
+    branches.append(label);
+  }
+  if (!branches.childElementCount) branches.textContent = "当前阶段没有需要确认的可选前置。";
+}
+
+function renderStoryRoute(selectedName = null, remembered = null) {
+  const select = $("#story-chapter");
+  select.replaceChildren(new Option("未设置", ""));
+  for (const item of storyChapters) {
+    if ($("#story-route").value === "common" && item.scope !== "common") continue;
+    select.append(new Option(item.script_name + (item.linked ? "" : "（独立场景）"), item.script_name));
+  }
+  select.value = selectedName || "";
+  if (select.selectedIndex < 0) select.value = "";
+  renderStoryChapter(remembered);
+}
+
+$("#story-button").addEventListener("click", async () => {
+  if (sending) return;
+  try {
+    clearError();
+    storyEditingConversation = conversationId;
+    const timeline = await api("/story/timeline");
+    if (conversationId !== storyEditingConversation || sending) return;
+    storyChapters = timeline.chapters;
+    $("#story-route").value = storyProgress.route;
+    $("#story-entry").value = storyProgress.entry_no;
+    $("#story-relationship").value = storyProgress.relationship;
+    $("#story-scene").value = storyProgress.scene;
+    $("#story-branches").replaceChildren();
+    renderStoryRoute(storyProgress.script_name, storyProgress.completed_scripts);
+    clearError($("#story-status"));
+    $("#story-dialog").showModal();
+  } catch (error) { showError(error); }
+});
+$("#story-route").addEventListener("change", () => { $("#story-entry").value = 0; renderStoryRoute(); });
+$("#story-chapter").addEventListener("change", () => { $("#story-entry").value = 0; renderStoryChapter(); });
+$("#story-complete-chapter").addEventListener("click", () => { $("#story-entry").value = $("#story-entry").max; });
+$("#story-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    if (sending || conversationId !== storyEditingConversation) throw new Error("会话已切换或正在回复，请重新打开进度窗口。");
+    const state = { route: $("#story-route").value, script_name: $("#story-chapter").value || null,
+      entry_no: Number($("#story-entry").value),
+      completed_scripts: [...$("#story-branches").querySelectorAll("input:checked")].map((item) => item.value),
+      relationship: $("#story-relationship").value.trim(), scene: $("#story-scene").value.trim() };
+    if (conversationId) {
+      const data = await api(`/conversations/${conversationId}/story-progress`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(state) });
+      storyProgress = data.story_progress;
+    } else storyProgress = await api("/story/validate-progress", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(state) });
+    showStoryProgress();
+    closeDialog("story-dialog");
+  } catch (error) { showError(error, $("#story-status")); }
+});
+
 function renderConversations(items) {
   conversationList.replaceChildren();
   for (const item of items) {
@@ -241,6 +337,8 @@ async function loadHistory(id) {
     clearError();
     const data = await api(`/conversations/${id}/messages`);
     conversationId = id;
+    storyProgress = data.conversation.story_progress || emptyStoryProgress();
+    showStoryProgress();
     localStorage.setItem("hiyoriConversationId", id);
     $("#chat-title").textContent = data.conversation.title;
     recallInfo.textContent = "发送新消息时会重新检索相关记忆。";
@@ -261,6 +359,8 @@ async function loadHistory(id) {
 function newChat() {
   if (sending) return;
   conversationId = null;
+  storyProgress = emptyStoryProgress();
+  showStoryProgress();
   localStorage.removeItem("hiyoriConversationId");
   $("#chat-title").textContent = "新对话";
   recallInfo.textContent = "每轮会带上最近消息，并按需召回长期记忆。";
@@ -333,7 +433,8 @@ form.addEventListener("submit", async (event) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message, conversation_id: conversationId,
-        thinking: thinkingEnabled.checked, tools_enabled: toolsEnabled.checked }),
+        thinking: thinkingEnabled.checked, tools_enabled: toolsEnabled.checked,
+        ...(conversationId ? {} : { story_progress: storyProgress }) }),
     });
     if (!response.ok) {
       const failure = await response.json();

@@ -27,6 +27,8 @@
             <h1 id="chat-title">新对话</h1>
             <p class="subtitle">V0.9 · 角色、记忆与工具查询</p>
             <p id="recall-info" class="recall-info">每轮会带上最近消息，并按需召回长期记忆。</p>
+            <p id="story-progress-label" class="recall-info">剧情进度未设置，暂不召回原作剧情。</p>
+            <button id="story-button" class="secondary" type="button">剧情进度与场景</button>
           </div>
         </header>
 
@@ -54,6 +56,28 @@
         </footer>
       </main>
     </div>
+
+    <dialog id="story-dialog" class="settings-dialog">
+      <form id="story-form">
+        <div class="dialog-heading"><h2>本会话剧情进度</h2><button class="icon-button" type="button" data-close="story-dialog" aria-label="关闭">×</button></div>
+        <p class="hint">对话者固定为智宏（哥哥）。进度只属于当前会话，不会随聊天自动推进。新对话的设定随第一条消息一起保存。回退进度后，旧聊天仍保留；想从头体验建议开新对话。</p>
+        <label for="story-route">路线</label>
+        <select id="story-route"><option value="common">共通线</option><option value="hiyori">妃爱线（含共通前置）</option></select>
+        <label for="story-chapter">当前章节</label>
+        <select id="story-chapter"></select>
+        <label for="story-entry">截至台词序号（从 0 开始）</label>
+        <input id="story-entry" type="number" min="0" value="0" required />
+        <button id="story-complete-chapter" class="secondary" type="button">设为本章已完成</button>
+        <p id="story-boundary-info" class="hint"></p>
+        <fieldset><legend>确认已经经历的可选分支</legend><div id="story-branches"></div></fieldset>
+        <label for="story-relationship">当前关系</label>
+        <input id="story-relationship" maxlength="100" value="兄妹" required />
+        <label for="story-scene">当前场景</label>
+        <textarea id="story-scene" rows="2" maxlength="500" placeholder="例如：晚上在家，刚吃完饭，聊今天的录音工作。"></textarea>
+        <p id="story-status" class="dialog-status" role="alert" hidden></p>
+        <div class="dialog-actions"><button class="primary" type="submit">保存本会话进度</button></div>
+      </form>
+    </dialog>
 
     <dialog id="character-dialog" class="settings-dialog">
       <form id="character-form">

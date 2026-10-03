@@ -79,21 +79,21 @@ def update_character(
         ).fetchone()
 
 
-def create_conversation(first_message: str) -> dict:
+def create_conversation(first_message: str, story_progress: dict | None = None) -> dict:
     conversation_id = uuid4()
     title = first_message[:40]
     with connect() as conn:
         return conn.execute(
-            """INSERT INTO conversation (id, title) VALUES (%s, %s)
-               RETURNING id, title, created_at, updated_at""",
-            (conversation_id, title),
+            """INSERT INTO conversation (id, title, story_progress) VALUES (%s, %s, %s)
+               RETURNING id, title, story_progress, created_at, updated_at""",
+            (conversation_id, title, Jsonb(story_progress) if story_progress is not None else None),
         ).fetchone()
 
 
 def get_conversation(conversation_id: UUID) -> dict | None:
     with connect() as conn:
         return conn.execute(
-            "SELECT id, title, created_at, updated_at FROM conversation WHERE id = %s",
+            "SELECT id, title, story_progress, created_at, updated_at FROM conversation WHERE id = %s",
             (conversation_id,),
         ).fetchone()
 
@@ -194,7 +194,8 @@ def role_knowledge_count(character_name: str) -> int:
 
 
 def recall_role_knowledge(
-    embedding: list[float], character_name: str, limit: int = 8
+    embedding: list[float], character_name: str, limit: int = 8,
+    completed_scripts: list[str] | None = None,
 ) -> list[dict]:
     vector = vector_literal(embedding)
     with connect() as conn:
@@ -202,8 +203,10 @@ def recall_role_knowledge(
             """SELECT source_key, kind, content,
                       1 - (embedding <=> %s::vector) AS similarity
                FROM role_knowledge WHERE character_name = %s
+                 AND (%s::text[] IS NULL OR
+                      replace(split_part(source_key, ':', 1), 'script' || chr(92), '') = ANY(%s))
                ORDER BY embedding <=> %s::vector LIMIT %s""",
-            (vector, character_name, vector, limit),
+            (vector, character_name, completed_scripts, completed_scripts, vector, limit),
         ).fetchall()
 
 
@@ -237,16 +240,57 @@ def game_dialogue_counts() -> dict[str, int]:
         ).fetchone()
 
 
-def recall_game_dialogue(embedding: list[float], limit: int = 5) -> list[dict]:
+def recall_game_dialogue(embedding: list[float], limit: int = 5,
+                         bounds: dict[str, int] | None = None) -> list[dict]:
     vector = vector_literal(embedding)
     with connect() as conn:
         return conn.execute(
             """SELECT script_name, first_entry, last_entry, scope, content,
                       1 - (embedding <=> %s::vector) AS similarity
                FROM game_dialogue_chunk
+               WHERE (%s::jsonb IS NULL OR EXISTS (
+                   SELECT 1 FROM jsonb_each_text(%s::jsonb) AS bound
+                   WHERE bound.key = script_name AND first_entry <= bound.value::integer))
                ORDER BY embedding <=> %s::vector LIMIT %s""",
-            (vector, vector, limit),
+            (vector, Jsonb(bounds) if bounds is not None else None,
+             Jsonb(bounds) if bounds is not None else None, vector, limit),
         ).fetchall()
+
+
+def story_graph() -> tuple[list[dict], list[dict]]:
+    with connect() as conn:
+        chapters = conn.execute("SELECT script_name, scope, max_entry, uncertain_from FROM story_chapter").fetchall()
+        edges = conn.execute("SELECT source_script, source_entry, target_script, condition, via FROM story_edge").fetchall()
+    return chapters, edges
+
+
+def update_story_progress(conversation_id: UUID, progress: dict) -> dict | None:
+    with connect() as conn:
+        return conn.execute(
+            """UPDATE conversation SET story_progress = %s, updated_at = now()
+               WHERE id = %s RETURNING id, title, story_progress""",
+            (Jsonb(progress), conversation_id),
+        ).fetchone()
+
+
+def expand_game_dialogue(hits: list[dict], bounds: dict[str, int]) -> list[dict]:
+    """补上下文时再次截住进度；未来台词不进入返回的文本。"""
+    result = []
+    if not hits:
+        return result
+    with connect() as conn:
+        for hit in hits:
+            maximum = bounds.get(hit["script_name"], -1)
+            rows = conn.execute(
+                """SELECT entry_no, speaker, content FROM game_dialogue_line
+                   WHERE script_name = %s AND entry_no BETWEEN %s AND %s ORDER BY entry_no""",
+                (hit["script_name"], max(0, hit["first_entry"] - 3), min(maximum, hit["last_entry"] + 3)),
+            ).fetchall()
+            if not rows:
+                continue
+            result.append({**hit, "first_entry": rows[0]["entry_no"], "last_entry": rows[-1]["entry_no"],
+                           "content": "\n".join(f"{r['speaker'] or '旁白'}：{r['content']}" for r in rows)[:1400]})
+    return result
 
 
 def add_memory(

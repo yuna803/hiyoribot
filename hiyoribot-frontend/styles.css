@@ -124,7 +124,7 @@ h1 { margin: 0; font-size: 19px; }
 
 footer { padding: 16px 24px 20px; border-top: 1px solid #edf0f5; }
 #chat-form { display: flex; align-items: flex-end; gap: 12px; }
-input, textarea {
+input, textarea, select {
   width: 100%;
   min-width: 0;
   padding: 11px 13px;
@@ -171,6 +171,12 @@ button:disabled { opacity: .6; cursor: wait; }
 .dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
 .dialog-heading h2 { margin: 0; font-size: 20px; }
 .settings-dialog label { display: block; margin: 14px 0 6px; font-size: 13px; font-weight: 600; }
+#story-button { min-height: 30px; margin-top: 8px; font-size: 12px; }
+#story-complete-chapter { align-self: flex-start; margin-top: 8px; }
+#story-dialog fieldset { margin-top: 14px; border: 1px solid #dfe4ee; border-radius: 10px; }
+#story-branches { max-height: 170px; overflow-y: auto; }
+#story-branches label { display: flex; align-items: center; gap: 8px; font-weight: normal; margin: 8px 0; }
+#story-branches input { width: 16px; height: 16px; margin: 0; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .icon-button { min-height: 32px; border: 0; background: transparent; color: #7c879c; font-size: 24px; }
 .stacked-form { margin-top: 24px; padding-top: 18px; border-top: 1px solid #edf0f5; }
