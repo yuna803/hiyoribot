@@ -13,6 +13,7 @@ const welcomeTemplate = $("#welcome").cloneNode(true);
 let conversationId = localStorage.getItem("hiyoriConversationId");
 let sending = false;
 let currentMemories = [];
+let activeGeneration = null;
 thinkingEnabled.checked = localStorage.getItem("hiyoriThinkingEnabled") !== "false";
 thinkingEnabled.addEventListener("change", () => {
   localStorage.setItem("hiyoriThinkingEnabled", String(thinkingEnabled.checked));
@@ -84,11 +85,21 @@ function addSpeechControl(bubble, text) {
     button.textContent = "正在生成配音…";
     caption.textContent = "";
     try {
-      const data = await api("/tts", {
+      const task = await api("/tts/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
       });
+      const stages = { queued:"排队中",waiting_gpu:"等待显卡空闲",translating:"正在翻译完整台词",
+        releasing_gpu:"正在释放聊天模型显存",synthesizing:"正在合成日语配音" };
+      let data;
+      while (bubble.isConnected) {
+        const job = await api(`/tts/jobs/${task.id}`);
+        if (job.stage === "failed") throw new Error(job.error || "配音失败，请重试");
+        if (job.stage === "ready") { data = job.result; break; }
+        caption.textContent = `${stages[job.stage] || "正在处理"} · 已等待 ${Math.round(job.elapsed_seconds)} 秒`;
+        await new Promise((resolve) => setTimeout(resolve,1500));
+      }
       if (!bubble.isConnected) return;
       sourceCaption.textContent = data.source_text;
       sourceDetails.hidden = false;
@@ -106,6 +117,43 @@ function addSpeechControl(bubble, text) {
   });
   controls.append(button, sourceDetails, caption, audio);
   bubble.append(controls);
+}
+
+function addRecallTrace(saved = null) {
+  const box = document.createElement("details");
+  box.className = "reasoning-box recall-trace";
+  box.hidden = true;
+  const title = document.createElement("summary");
+  title.textContent = "剧情召回对照（展开查看）";
+  const body = document.createElement("div");
+  box.append(title,body);
+  messages.append(box);
+  function append(record) {
+    box.hidden = false;
+    const section = document.createElement("section");
+    const heading = document.createElement("p");
+    heading.textContent = `第 ${record.round} 轮实际传入的参考 · 会话摘要${record.summary_used ? "已传入" : "未传入"}`;
+    if (record.progress?.script_name) heading.textContent += ` · 当轮进度 ${record.progress.script_name} #${record.progress.entry_no}`;
+    section.append(heading);
+    for (const row of record.notes || []) {
+      const text = document.createElement("pre");
+      text.textContent = `角色资料 ${row.source}\n${row.content}`;
+      section.append(text);
+    }
+    for (const row of record.dialogue || []) {
+      const text = document.createElement("pre");
+      text.textContent = `${row.script_name} #${row.first_entry}～${row.last_entry} · 相似度 ${Number(row.similarity).toFixed(2)}\n${row.content}`;
+      section.append(text);
+    }
+    if (!(record.notes?.length || record.dialogue?.length)) {
+      const hint = document.createElement("p");
+      hint.textContent = "这一轮没有传入原作片段。工具查询结果可在工具记录中查看；传入资料不代表模型一定遵循。";
+      section.append(hint);
+    }
+    body.append(section);
+  }
+  for (const record of saved?.rounds || []) append(record);
+  return { append,box };
 }
 
 function addReasoning(text = "") {
@@ -344,6 +392,7 @@ async function loadHistory(id) {
     recallInfo.textContent = "发送新消息时会重新检索相关记忆。";
     messages.replaceChildren();
     for (const item of data.messages) {
+      if (item.role === "assistant" && item.recalled_context) addRecallTrace(item.recalled_context);
       if (item.role === "assistant") showSavedTools(item.agent_messages);
       if (item.role === "assistant" && item.reasoning) addReasoning(item.reasoning);
       const bubble = addBubble(item.role, item.content);
@@ -393,6 +442,7 @@ async function readSse(response, onEvent) {
       if (!name || !dataLine) continue;
       const data = JSON.parse(dataLine);
       if (name === "error") throw new Error(data.message || "模型服务调用失败");
+      if (name === "cancelled") { const error = new Error("已停止生成，本轮未保存"); error.name = "AbortError"; throw error; }
       onEvent(name, data);
       if (name === "done") {
         completed = true;
@@ -416,6 +466,10 @@ form.addEventListener("submit", async (event) => {
   if (!message || sending) return;
 
   sending = true;
+  const generation = { id:crypto.randomUUID(),controller:new AbortController(),stopped:false };
+  activeGeneration = generation;
+  $("#stop-generation").hidden = false;
+  $("#stop-generation").disabled = false;
   clearError();
   $("#welcome")?.remove();
   addBubble("user", message);
@@ -423,6 +477,7 @@ form.addEventListener("submit", async (event) => {
   input.disabled = true;
   send.disabled = true;
   const toolLog = addToolLog();
+  const recalled = addRecallTrace();
   const thought = addReasoning();
   thought.box.hidden = true;
   const pending = addBubble("assistant", "正在回复…", "pending");
@@ -432,7 +487,8 @@ form.addEventListener("submit", async (event) => {
     const response = await fetch("/chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, conversation_id: conversationId,
+      signal:generation.controller.signal,
+      body: JSON.stringify({ message, conversation_id: conversationId,generation_id:generation.id,
         thinking: thinkingEnabled.checked, tools_enabled: toolsEnabled.checked,
         ...(conversationId ? {} : { story_progress: storyProgress }) }),
     });
@@ -449,6 +505,8 @@ form.addEventListener("submit", async (event) => {
         recallInfo.textContent = recalled.length
           ? `本轮召回：${recalled.map((item) => item.content.slice(0, 40)).join("；")}`
           : "本轮未召回长期记忆。";
+      } else if (name === "context_used") {
+        recalled.append(data);
       } else if (name === "agent_round" && data.round > 1) {
         pending.textContent = `正在继续思考（第 ${data.round} 轮）…`;
         pending.classList.add("pending");
@@ -489,19 +547,35 @@ form.addEventListener("submit", async (event) => {
   } catch (error) {
     toolLog.finish(true);
     if (received) {
-      pending.textContent += "\n\n（回复中断，未保存这轮聊天）";
+      pending.textContent += error.name === "AbortError" ? "\n\n（已停止，本轮未保存）" : "\n\n（回复中断，未保存这轮聊天）";
       if (!thought.box.hidden) thought.summary.textContent = "模型思考（本轮未保存）";
     } else {
       pending.remove();
       thought.box.remove();
     }
-    showError(error);
+    showError(error.name === "AbortError" ? new Error("已停止生成，输入框保留原消息，可修改后重新发送。") : error);
+    input.value = message;
   } finally {
     sending = false;
     input.disabled = false;
     send.disabled = false;
+    activeGeneration = null;
+    $("#stop-generation").hidden = true;
     input.focus();
   }
+});
+
+$("#stop-generation").addEventListener("click", async () => {
+  const generation = activeGeneration;
+  if (!generation) return;
+  $("#stop-generation").disabled = true;
+  try {
+    const result = await api(`/generation/${generation.id}/cancel`, { method:"POST" });
+    if (result.accepted) {
+      generation.stopped = true;
+      generation.controller.abort();
+    } else showError(new Error("回复已生成，正在完成保存，请稍等。"));
+  } catch (error) { showError(error); $("#stop-generation").disabled = false; }
 });
 
 function closeDialog(id) { $(`#${id}`).close(); }
@@ -510,6 +584,45 @@ for (const button of document.querySelectorAll("[data-close]")) {
 }
 
 $("#new-chat").addEventListener("click", newChat);
+let summaryRevision = 0;
+let summaryConversation = null;
+
+async function loadSummary() {
+  const data = await api(`/conversations/${summaryConversation}/summary`);
+  $("#conversation-summary").value = data.summary;
+  summaryRevision = data.revision;
+  $("#summary-info").textContent = data.through_id ? `已整理至消息 #${data.through_id}；最近问答仍保留在上下文。` : "尚未生成摘要。旧问答积累后会自动整理，也可手动更新。";
+  if (data.summary) $("#summary-info").textContent += data.origin === "manual" ? " 当前为手动修正版本。" : " 当前由模型整理，可核对修正。";
+}
+$("#summary-button").addEventListener("click", async () => {
+  if (sending) return;
+  if (!conversationId) { showError(new Error("请先开始一个会话，再查看摘要。")); return; }
+  summaryConversation = conversationId;
+  clearError($("#summary-status"));
+  $("#summary-dialog").showModal();
+  try { await loadSummary(); }
+  catch (error) { showError(error,$("#summary-status")); }
+});
+$("#update-summary").addEventListener("click", async () => {
+  const button = $("#update-summary");
+  button.disabled = true;
+  button.textContent = "正在整理问答…";
+  try {
+    await api(`/conversations/${summaryConversation}/summary`, { method:"POST" });
+    await loadSummary();
+    clearError($("#summary-status"));
+  } catch (error) { showError(error,$("#summary-status")); }
+  finally { button.disabled = false; button.textContent = "根据新问答更新"; }
+});
+$("#summary-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    await api(`/conversations/${summaryConversation}/summary`, { method:"PUT",
+      headers:{"Content-Type":"application/json"}, body:JSON.stringify({summary:$("#conversation-summary").value,revision:summaryRevision}) });
+    await loadSummary();
+    closeDialog("summary-dialog");
+  } catch (error) { showError(error,$("#summary-status")); }
+});
 $("#character-button").addEventListener("click", async () => {
   const dialog = $("#character-dialog");
   dialog.showModal();
@@ -561,24 +674,69 @@ function memoryRow(item) {
   row.innerHTML = `<div class="memory-row-top"><input class="memory-select" type="checkbox" aria-label="选择合并" />
     <textarea class="memory-text" maxlength="300" rows="2" aria-label="记忆内容"></textarea></div>
     <div class="memory-row-bottom"><label>重要度 <input class="memory-importance" type="number" min="1" max="5" /></label>
-    <button class="secondary memory-save" type="button">保存</button>
-    <button class="secondary memory-delete" type="button">遗忘</button></div>`;
+    <button class="secondary memory-save" type="button">保存文字</button>
+    <button class="secondary memory-confirm" type="button">确认分类</button>
+    <button class="secondary memory-reject" type="button">不采用</button>
+    <button class="secondary memory-delete" type="button">遗忘</button></div>
+    <select class="memory-kind" aria-label="记忆分类"><option value="real">现实事实或偏好</option><option value="roleplay">角色扮演设定</option><option value="hypothetical">临时假设（不召回）</option></select>
+    <p class="memory-meta"></p><details class="memory-source"><summary>查看来源用户原话</summary><p></p></details>
+    <div class="memory-conflicts"></div>`;
   row.querySelector(".memory-text").value = item.content;
   row.querySelector(".memory-importance").value = item.importance;
+  row.querySelector(".memory-kind").value = item.kind || "real";
+  row.dataset.status = item.status || "pending";
+  row.dataset.scope = item.conversation_id || item.source_conversation_id || conversationId || "";
+  const statusNames = {pending:"待确认",confirmed:"已确认",rejected:"不采用",superseded:"已替换"};
+  row.querySelector(".memory-meta").textContent = `${statusNames[item.status] || "旧版本待确认"} · ${item.conversation_title || "手动或旧版本条目"}${item.replaces_ids?.length ? ` · 替换了 #${item.replaces_ids.join("、#")}` : ""}`;
+  row.querySelector(".memory-source p").textContent = item.source_text || "这条记忆没有来源原话，请核对后再确认。";
+  row.querySelector(".memory-kind").addEventListener("change", () => loadMemoryConflicts(row));
+  loadMemoryConflicts(row);
   return row;
+}
+
+async function loadMemoryConflicts(row) {
+  const kind = row.querySelector(".memory-kind").value;
+  const scope = kind === "roleplay" ? row.dataset.scope : "";
+  const key = `${kind}:${scope}`;
+  row.dataset.reviewKey = key;
+  const button = row.querySelector(".memory-confirm");
+  const container = row.querySelector(".memory-conflicts");
+  button.disabled = true;
+  container.textContent = "正在检查相关旧记忆…";
+  try {
+    if (kind === "roleplay" && !scope) throw new Error("角色扮演条目需要所属会话，请先开始会话。");
+    const candidates = await api(`/memories/${row.dataset.id}/conflicts?kind=${kind}${scope ? `&conversation_id=${encodeURIComponent(scope)}` : ""}`);
+    if (row.dataset.reviewKey !== key || !row.isConnected) return;
+    container.replaceChildren();
+    const hint = document.createElement("p");
+    hint.textContent = candidates.length ? "可能相关的已确认旧记忆（仅勾选的条目会被替换）：" :
+      row.dataset.status === "pending" ? "没有发现相关旧记忆；分类确认后才参与召回。" : "没有发现相关旧记忆；变更分类后请再次确认。";
+    container.append(hint);
+    for (const candidate of candidates) {
+      const label = document.createElement("label");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox"; checkbox.className = "memory-conflict-select"; checkbox.value = candidate.id;
+      label.append(checkbox,document.createTextNode(`#${candidate.id} ${candidate.content}`));
+      container.append(label);
+    }
+    button.disabled = false;
+  } catch (error) { if (row.dataset.reviewKey === key) container.textContent = error.message; }
 }
 
 async function refreshMemories() {
   currentMemories = await api("/memories");
   const list = $("#memory-list");
   list.replaceChildren();
-  if (currentMemories.length === 0) {
+  const filter = $("#memory-filter").value;
+  const visible = currentMemories.filter((item) => filter === "all" || (filter === "active" && ["pending","confirmed"].includes(item.status)) ||
+    (filter === "archive" && ["rejected","superseded"].includes(item.status)) || item.status === filter);
+  if (visible.length === 0) {
     const empty = document.createElement("p");
     empty.className = "hint";
-    empty.textContent = "还没有长期记忆。";
+    empty.textContent = "这一分类下没有记忆。";
     list.append(empty);
   } else {
-    for (const item of currentMemories) list.append(memoryRow(item));
+    for (const item of visible) list.append(memoryRow(item));
   }
 }
 
@@ -587,6 +745,10 @@ $("#memory-button").addEventListener("click", async () => {
   clearError($("#memory-status"));
   try { await refreshMemories(); }
   catch (error) { showError(error, $("#memory-status")); }
+});
+$("#memory-filter").addEventListener("change", async () => {
+  try { await refreshMemories(); }
+  catch (error) { showError(error,$("#memory-status")); }
 });
 
 $("#refresh-memories").addEventListener("click", async () => {
@@ -618,6 +780,14 @@ $("#memory-list").addEventListener("click", async (event) => {
           importance: Number(row.querySelector(".memory-importance").value),
         }),
       });
+    } else if (event.target.classList.contains("memory-confirm") || event.target.classList.contains("memory-reject")) {
+      const kind = row.querySelector(".memory-kind").value;
+      await api(`/memories/${id}`, {method:"PUT",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({content:row.querySelector(".memory-text").value.trim(),importance:Number(row.querySelector(".memory-importance").value)})});
+      await api(`/memories/${id}/review`, {method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({kind,status:event.target.classList.contains("memory-reject") ? "rejected" : "confirmed",
+          conversation_id:kind === "roleplay" ? row.dataset.scope || null : null,
+          replace_ids:[...row.querySelectorAll(".memory-conflict-select:checked")].map((input) => Number(input.value))})});
     } else if (event.target.classList.contains("memory-delete")) {
       if (!window.confirm("确定要遗忘这条记忆吗？")) return;
       await api(`/memories/${id}`, { method: "DELETE" });
@@ -636,9 +806,12 @@ $("#add-memory-form").addEventListener("submit", async (event) => {
       body: JSON.stringify({
         content: $("#new-memory").value.trim(),
         importance: Number($("#new-importance").value),
+        kind:$("#new-memory-kind").value,
+        conversation_id:$("#new-memory-kind").value === "roleplay" ? conversationId : null,
       }),
     });
     $("#new-memory").value = "";
+    if ($("#new-memory-kind").value === "hypothetical") $("#memory-filter").value = "archive";
     await refreshMemories();
     clearError($("#memory-status"));
   } catch (error) { showError(error, $("#memory-status")); }

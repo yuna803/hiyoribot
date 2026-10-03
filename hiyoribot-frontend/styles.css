@@ -172,6 +172,14 @@ button:disabled { opacity: .6; cursor: wait; }
 .dialog-heading h2 { margin: 0; font-size: 20px; }
 .settings-dialog label { display: block; margin: 14px 0 6px; font-size: 13px; font-weight: 600; }
 #story-button { min-height: 30px; margin-top: 8px; font-size: 12px; }
+#summary-button { min-height: 30px; margin-top: 8px; font-size: 12px; }
+#stop-generation[hidden] { display: none; }
+.recall-trace { width: min(88%,700px); }
+.recall-trace pre { max-height: 230px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.memory-meta,.memory-conflicts,.memory-source { margin: 8px 0; font-size: 12px; color: #69748c; }
+.memory-conflicts label { display: flex; align-items: center; gap: 6px; font-weight: normal; }
+.memory-conflicts input { width: 16px; height: 16px; flex: none; }
+.memory-row .memory-kind { margin: 8px 0; }
 #story-complete-chapter { align-self: flex-start; margin-top: 8px; }
 #story-dialog fieldset { margin-top: 14px; border: 1px solid #dfe4ee; border-radius: 10px; }
 #story-branches { max-height: 170px; overflow-y: auto; }
@@ -188,6 +196,7 @@ button:disabled { opacity: .6; cursor: wait; }
 .memory-select { width: 18px; height: 18px; flex: none; }
 .memory-row-top textarea { flex: 1; }
 .memory-row-bottom { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.memory-row-bottom { flex-wrap: wrap; }
 .memory-row-bottom label { margin: 0; }
 .memory-row-bottom input { width: 62px; }
 .memory-row-bottom button { min-height: 34px; padding: 0 10px; }

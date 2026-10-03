@@ -1,4 +1,31 @@
-# 妃爱日语 TTS 试训
+# 本机工具与妃爱日语 TTS 试训
+
+## 启动、停止与数据库备份
+
+以下命令在仓库根目录运行，使用后端已有虚拟环境。根目录的四个中文 `.cmd` 文件封装同样的操作：
+
+```powershell
+.\hiyoribot-backend\venv\Scripts\python.exe tools/start_hiyoribot.py
+.\hiyoribot-backend\venv\Scripts\python.exe tools/start_hiyoribot.py --stop
+.\hiyoribot-backend\venv\Scripts\python.exe tools/database_backup.py backup
+.\hiyoribot-backend\venv\Scripts\python.exe tools/database_backup.py check --file 'E:\unser\q\hiyoribot_backups\实际文件.dump'
+```
+
+启动器沿用本机 PostgreSQL 的 `postgresql-data` 和 Ollama 模型目录。`--no-browser` 只启动服务；`--database-only` 只检查或启动数据库。`HIYORI_LOCAL_HOME` 默认 `E:\unser\q`；配置仍读被 Git 忽略的后端 YAML，`DATABASE_URL` 优先。远程数据库只连接、不启动。停止前核对健康检查 PID 和本项目 Python 命令行，避免停止其他项目；数据库与 Ollama 保留运行。
+
+备份为 PostgreSQL 自定义归档，附 SHA256、大小和来源库名。默认备份工具目录 `E:\unser\q\postgresql\Library\bin`，可用 `--pg-bin` 修改；`--folder` 指定仓库外目录。`--database-name` 仅改变目标库名称，连接主机和账号沿用现有配置。不把密码放命令行。
+
+在网页已停止后明确指定恢复目标：
+
+```powershell
+.\hiyoribot-backend\venv\Scripts\python.exe tools/database_backup.py restore --file 'E:\unser\q\hiyoribot_backups\实际文件.dump' --confirm-restore hiyoribot
+```
+
+`恢复数据库.cmd` 接受拖入 `.dump`，并交互核对目标库名称、停网页、恢复及重新启动网页。恢复前还会备份当前目标；使用 `--single-transaction --exit-on-error`，失败回滚。保留权限声明，忽略原 owner，因此迁往其他机器时应先准备相应角色和 pgvector。不会自动删除归档以外的额外对象。
+
+恢复验证请先创建独立临时库，再加 `--database-name 临时库名称 --confirm-restore 临时库名称`，核对内容后清理临时库。不要用真实聊天库试验恢复流程。本轮已在临时库核对全部九张业务表的行数和完整行摘要一致。
+
+## 妃爱日语 TTS 试训
 
 本目录只放可复现脚本。原声、日文训练标注、试听音频和模型权重留在本机 `E:\unser\q\hiyori_tts`，不进入公开仓库。本轮只使用共通线和妃爱主线，不接聊天网页。
 

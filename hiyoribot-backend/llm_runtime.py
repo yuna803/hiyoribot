@@ -1,7 +1,7 @@
 """本机模型的显卡串行使用、上下文裁剪与请求选项。"""
 
 import json
-from contextlib import nullcontext
+from contextlib import contextmanager
 from functools import lru_cache
 from threading import Lock
 from urllib.parse import urlsplit, urlunsplit
@@ -17,8 +17,22 @@ def is_local(config) -> bool:
     return getattr(config, "provider", "deepseek") == "local"
 
 
-def gpu_session(config):
-    return _gpu_lock if is_local(config) else nullcontext()
+@contextmanager
+def gpu_session(config, job=None):
+    if not is_local(config):
+        if job:
+            job.check()
+        yield
+        return
+    while not _gpu_lock.acquire(timeout=0.2):
+        if job:
+            job.check()
+    try:
+        if job:
+            job.check()
+        yield
+    finally:
+        _gpu_lock.release()
 
 
 def auxiliary_model(config) -> str:

@@ -12,6 +12,9 @@ agent_work/
 config.yaml
 *.log
 *.sqlite3
+*.dump
+*.backup
+*.partial
 
 # 游戏原始资源只保留在本机，仓库仅放整理后的简短角色资料
 *.pfs

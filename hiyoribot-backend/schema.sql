@@ -38,6 +38,10 @@ CREATE TABLE IF NOT EXISTS message (
 
 -- 会话进度不跟随全局角色卡变化；旧会话默认未设置，检索采取保守边界。
 ALTER TABLE conversation ADD COLUMN IF NOT EXISTS story_progress jsonb;
+ALTER TABLE conversation ADD COLUMN IF NOT EXISTS summary text NOT NULL DEFAULT '';
+ALTER TABLE conversation ADD COLUMN IF NOT EXISTS summary_through_id bigint NOT NULL DEFAULT 0;
+ALTER TABLE conversation ADD COLUMN IF NOT EXISTS summary_revision integer NOT NULL DEFAULT 0;
+ALTER TABLE conversation ADD COLUMN IF NOT EXISTS summary_origin text NOT NULL DEFAULT 'auto';
 
 CREATE TABLE IF NOT EXISTS story_chapter (
     script_name text PRIMARY KEY,
@@ -58,6 +62,7 @@ ALTER TABLE story_chapter ADD COLUMN IF NOT EXISTS uncertain_from integer;
 ALTER TABLE message ADD COLUMN IF NOT EXISTS reasoning text;
 -- 保存本轮模型工具消息，供下次聊天回传和网页查看调用记录。
 ALTER TABLE message ADD COLUMN IF NOT EXISTS agent_messages jsonb;
+ALTER TABLE message ADD COLUMN IF NOT EXISTS recalled_context jsonb;
 
 CREATE INDEX IF NOT EXISTS message_conversation_idx ON message (conversation_id, id DESC);
 
@@ -73,6 +78,17 @@ CREATE TABLE IF NOT EXISTS memory (
 
 CREATE INDEX IF NOT EXISTS memory_embedding_idx
     ON memory USING hnsw (embedding vector_cosine_ops);
+
+-- 旧记忆保留但进入待确认；自动提取不直接当作真实事实。
+ALTER TABLE memory ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'real'
+    CHECK (kind IN ('real', 'roleplay', 'hypothetical'));
+ALTER TABLE memory ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'confirmed', 'rejected', 'superseded'));
+ALTER TABLE memory ADD COLUMN IF NOT EXISTS conversation_id uuid REFERENCES conversation(id);
+ALTER TABLE memory ADD COLUMN IF NOT EXISTS fact_key text NOT NULL DEFAULT '';
+ALTER TABLE memory ADD COLUMN IF NOT EXISTS dedup_key text UNIQUE;
+ALTER TABLE memory ADD COLUMN IF NOT EXISTS replaces_ids bigint[] NOT NULL DEFAULT '{}';
+ALTER TABLE memory DROP CONSTRAINT IF EXISTS memory_content_key;
 
 -- 原作角色资料与用户长期记忆分开存放；角色名称避免切换角色后串用资料。
 CREATE TABLE IF NOT EXISTS role_knowledge (

@@ -64,7 +64,7 @@ class LocalModelTests(unittest.TestCase):
               patch.dict(os.environ, {"DEEPSEEK_API_KEY": "cloud-secret",
                                       "DEEPSEEK_BASE_URL": "https://cloud.invalid",
                                       "DEEPSEEK_MODEL": "cloud-model"}),
-              patch("main.prepare_chat", return_value=("conversation", [{"role": "system", "content": "角色"}], [], "妃爱")),
+              patch("main.prepare_chat", return_value=("conversation", [{"role": "system", "content": "角色"}], [], "妃爱",{})),
               patch("main.OpenAI") as client):
             current = resolve_config()
             self.assertEqual(current.base_url, "http://127.0.0.1:11434/v1")

@@ -2,6 +2,8 @@
 
 import logging
 from functools import lru_cache
+from typing import Literal
+from uuid import UUID
 
 from fastembed import TextEmbedding
 from openai import OpenAI
@@ -17,14 +19,18 @@ MIN_SIMILARITY = 0.55
 EXTRACTION_PROMPT = """你负责从用户原话提取适合长期记住的事实或偏好。
 只依据用户当前这条消息，不推测，也不要把助手说的话当成用户事实。
 只保留今后聊天可能有用的稳定信息；临时任务、闲聊、密码、密钥、证件号和详细地址不要保存。
+区分 real（现实中的事实/偏好）、roleplay（智宏/哥哥在角色扮演中的设定）、hypothetical（假如、想象、未发生的提议）。
+与妃爱的剧情互动默认属于 roleplay，只有明确说现实生活中的自己时才归为 real；假设不要当作事实。
 最多提取 3 条，每条独立完整，不超过 300 字。重要度为 1 到 5。
-仅返回 JSON 对象，格式为 {"facts":[{"content":"...","importance":3}]}。
+仅返回 JSON 对象，格式为 {"facts":[{"content":"...","importance":3,"kind":"real","fact_key":"主题"}]}。
 没有值得保存的信息时返回 {"facts":[]}。"""
 
 
 class ExtractedFact(BaseModel):
     content: str = Field(min_length=3, max_length=300)
     importance: int = Field(ge=1, le=5)
+    kind: Literal["real", "roleplay", "hypothetical"]
+    fact_key: str = Field(default="", max_length=80)
 
 
 class ExtractedFacts(BaseModel):
@@ -47,10 +53,10 @@ def embed(text: str) -> list[float]:
     return [float(value) for value in values]
 
 
-def recall(query: str) -> list[dict]:
-    if storage.memory_count() == 0:
+def recall(query: str, conversation_id: UUID | None = None) -> list[dict]:
+    if storage.memory_count(conversation_id) == 0:
         return []
-    candidates = storage.recall_memories(embed(query), limit=12)
+    candidates = storage.recall_memories(embed(query), limit=12, conversation_id=conversation_id)
     relevant = [row for row in candidates if float(row["similarity"]) >= MIN_SIMILARITY]
     relevant.sort(
         key=lambda row: float(row["similarity"]) + 0.03 * (row["importance"] - 3),
@@ -76,7 +82,8 @@ def extract_and_store(user_text: str, source_message_id: int, config) -> int:
     facts = ExtractedFacts.model_validate_json(content or '{}').facts
     for fact in facts:
         storage.add_memory(
-            fact.content.strip(), fact.importance, embed(fact.content), source_message_id
+            fact.content.strip(), fact.importance, embed(fact.content), source_message_id,
+            kind=fact.kind,status="pending",fact_key=fact.fact_key,
         )
     return len(facts)
 

@@ -6,6 +6,8 @@ model: "deepseek-flash"
 base_url: "https://api.deepseek.com"
 # 每次成功聊天后再调用一次模型提取长期记忆；会增加一次模型请求。
 auto_extract_memory: true
+# 自动提取先进入待确认，确认分类后才召回。旧问答积累到一批后自动生成会话摘要。
+auto_summarize: true
 # 本机或远程 PostgreSQL＋pgvector 连接地址；也可设置 DATABASE_URL 环境变量。
 database_url: ""
 # GPT-SoVITS 试训目录（包含 pilot_v1、env、GPT-SoVITS）；也可用 HIYORI_TTS_HOME。

@@ -29,7 +29,7 @@ class MemoryTest(unittest.TestCase):
 
     def test_extract_stores_valid_fact(self) -> None:
         response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
-            content='{"facts":[{"content":"用户喜欢猫","importance":4}]}'
+            content='{"facts":[{"content":"用户喜欢猫","importance":4,"kind":"real"}]}'
         ))])
         config = SimpleNamespace(api_key="test-key", base_url="https://example.test", model="test-model")
         with (
@@ -40,7 +40,7 @@ class MemoryTest(unittest.TestCase):
             client.return_value.__enter__.return_value.chat.completions.create.return_value = response
             count = memory_service.extract_and_store("我喜欢猫", 12, config)
         self.assertEqual(count, 1)
-        add.assert_called_once_with("用户喜欢猫", 4, [0.0] * 512, 12)
+        add.assert_called_once_with("用户喜欢猫",4,[0.0]*512,12,kind="real",status="pending",fact_key="")
 
     def test_vector_rejects_wrong_dimension(self) -> None:
         with self.assertRaises(ValueError):

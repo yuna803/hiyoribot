@@ -129,7 +129,8 @@ def _synthesize(japanese: str, output: Path, home: Path) -> None:
         raise HTTPException(status_code=502, detail="配音文件无效") from exc
 
 
-def create_speech(text: str, config) -> dict[str, str]:
+def create_speech(text: str, config, *, progress=None) -> dict[str, str]:
+    stage = progress or (lambda _value: None)
     source_text = extract_spoken_text(text)
     if not source_text:
         raise HTTPException(status_code=422, detail="这条回复只有动作说明，没有可配音的台词")
@@ -141,24 +142,31 @@ def create_speech(text: str, config) -> dict[str, str]:
     cache = dataset / "web_audio"
     audio = cache / f"{key}.wav"
     metadata = cache / f"{key}.json"
+    stage("waiting_gpu")
     with llm_runtime.gpu_session(config), _lock:
         if audio.is_file() and metadata.is_file():
             japanese = json.loads(metadata.read_text(encoding="utf-8"))["japanese"]
         else:
+            stage("translating")
             japanese = _translate_japanese(source_text, config)
             cache.mkdir(exist_ok=True)
             temporary = cache / f"{key}.{uuid4().hex}.wav"
+            temporary_metadata = temporary.with_suffix(".json")
             try:
                 try:
+                    stage("releasing_gpu")
                     llm_runtime.unload_local_models(config)
                 except httpx.HTTPError as exc:
                     raise HTTPException(status_code=503, detail="本地模型显存未释放，配音未启动") from exc
+                stage("synthesizing")
                 _synthesize(japanese, temporary, home)
                 os.replace(temporary, audio)
-                metadata.write_text(json.dumps({"source_text": source_text, "japanese": japanese}, ensure_ascii=False),
+                temporary_metadata.write_text(json.dumps({"source_text": source_text, "japanese": japanese}, ensure_ascii=False),
                                     encoding="utf-8")
+                os.replace(temporary_metadata,metadata)
             finally:
                 temporary.unlink(missing_ok=True)
+                temporary_metadata.unlink(missing_ok=True)
     return {"source_text": source_text, "japanese": japanese, "audio_url": f"/tts/audio/{key}"}
 
 

@@ -41,6 +41,9 @@ class ChatApiTest(unittest.TestCase):
         extraction = patch("memory_service.extract_safely")
         extraction.start()
         self.addCleanup(extraction.stop)
+        summary = patch("summary_service.refresh_safely")
+        summary.start()
+        self.addCleanup(summary.stop)
 
     def test_home_page_is_available(self) -> None:
         response = self.client.get("/")
@@ -79,7 +82,8 @@ class ChatApiTest(unittest.TestCase):
         from storage import save_turn
         save_turn.assert_called_once_with(self.conversation_id, "你好", "你好！", "",
                                          agent_messages=[{"role": "assistant", "content": "你好！",
-                                                          "reasoning_content": ""}])
+                                                          "reasoning_content": ""}],
+                                         recalled_context={"rounds":[{"round":1,"notes":[],"dialogue":[],"summary_used":False,"progress":None}]})
 
     def test_role_knowledge_recall_is_separate_from_user_memory(self) -> None:
         sample = {"kind": "style", "content": "妃爱工作时说话利落", "similarity": 0.75}
@@ -136,7 +140,8 @@ class ChatApiTest(unittest.TestCase):
         from storage import save_turn
         save_turn.assert_called_once_with(self.conversation_id, "你好", "你好", "先回应问候。",
                                          agent_messages=[{"role": "assistant", "content": "你好",
-                                                          "reasoning_content": "先回应问候。"}])
+                                                          "reasoning_content": "先回应问候。"}],
+                                         recalled_context={"rounds":[{"round":1,"notes":[],"dialogue":[],"summary_used":False,"progress":None}]})
 
     def test_thinking_can_be_disabled(self) -> None:
         fake = SimpleNamespace(choices=[SimpleNamespace(

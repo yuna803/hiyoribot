@@ -4,6 +4,31 @@
 
 当前包含角色聊天、长短期记忆、模型主动工具查询和按需日语配音。
 
+## 日常使用
+
+配置和本机环境就绪后，双击根目录的 `启动HiyoriBot.cmd`。它依次检查 PostgreSQL、Ollama（本地模式）和网页，打开 `http://127.0.0.1:8000/`。`停止HiyoriBot.cmd` 只关闭本项目网页服务，数据库和共享模型服务继续运行。日志在仓库外 `E:\unser\q\hiyoribot_runtime`；路径可通过 `HIYORI_LOCAL_HOME` 调整。这些脚本使用已有环境，不安装数据库或模型。
+
+| 入口 | 用途 |
+| --- | --- |
+| 剧情进度与场景 | 每个会话设置时间线、关系、地点和当前情境；模型不自行推进 |
+| 长期记忆 | 核对待确认候选的用户原话，修正分类，选择替换旧记忆 |
+| 会话摘要 | 查看旧问答摘要，手动更新或修正情境、安排和待续话题 |
+| 回复中的剧情召回对照 | 查看每轮实际送给模型的原作片段、脚本序号、相似度与进度 |
+| 停止生成 | 关闭上游流；停止后本轮不保存完整问答，输入保留供重发 |
+| 妃爱配音 | 显示排队、等待显卡、翻译、释放显存、合成阶段；失败可重试 |
+
+自动提取先保存为**待确认**，不会立即召回。现实事实可跨会话使用；角色扮演设定只用于所属会话；假设不作为事实召回。相关旧记忆只是纠错建议，由用户勾选后才替换，旧条目标为已替换并保留来源。手动新增是用户明确确认的内容；假设仍只归档。机器分类和摘要可能出错，窗口保留原话和修正入口。
+
+自动摘要只压缩最近 24 条以外的完整问答，积累至少 12 条旧消息后更新。摘要不删除历史，不作为长期事实；用户设置的场景优先，安排与意愿须能对上用户原句，助手提出的安排单列为未核实。改变剧情进度会清空旧摘要，重复保存同一进度不会清空；并发生成不会覆盖较新的人工修正。`auto_summarize: false` 可关闭自动摘要。DeepSeek 模式下摘要会增加模型调用，本地模式使用基础辅助模型。
+
+剧情对照记录上下文裁剪后实际保留的参考，每轮记录随回复保存，刷新仍可查看。工具查到的资料见工具记录。传入资料不代表模型一定遵循；没有检索证据的描述仍可能是模型编造。停止发生在完整回复已经进入数据库保存阶段时，页面会等待保存完成，不把已完成记录谎称为撤销。
+
+### 数据库备份与恢复
+
+双击 `备份数据库.cmd`，保存角色卡、会话、记忆、原作索引和剧情进度。默认位置为仓库外 `E:\unser\q\hiyoribot_backups`，每次生成 `.dump` 和同名 `.json`（大小与 SHA256）。两份文件一起保管；这不包含模型权重、原始游戏或配音缓存。
+
+把 `.dump` 拖到 `恢复数据库.cmd`，按提示输入目标库名称。程序先校验归档、关闭网页，再备份当前数据库，最后在一个事务内恢复；失败则回滚，随后尝试恢复网页服务。恢复会替换归档中包含的对象，使用前确认目标。备份必须放仓库外，凭据只通过子进程环境传递。命令行与临时库验证方法见 [工具说明](tools/README.md)。
+
 ## 本机小模型与角色微调
 
 本机模式通过 Ollama 运行 Qwen3-4B-Instruct-2507 的 Q4_K_M 量化模型。它提供正式回复和工具调用，不输出思考链。网页仍使用原来的角色卡、短期上下文、长期记忆和原作检索；微调只学习妃爱的接话和说话方式，剧情事实仍由检索库提供。
@@ -81,17 +106,18 @@ cd hiyoribot-backend
 用户消息
   ├─ 角色的 System Prompt（PostgreSQL）
   ├─ 相关原作角色资料（独立 role_knowledge 表，pgvector 召回）
-  ├─ 同一会话最近的消息（短期上下文）
-  └─ pgvector 找到的相关用户长期记忆
+  ├─ 同一会话最近的消息和旧问答摘要（短期上下文）
+  └─ pgvector 找到的已确认现实事实或本会话角色扮演记忆
        ↓
      本机模型或 DeepSeek → 按需调用查询工具 → 读取结果继续判断 → 流式回复 → 保存完整问答
        ↓
-     后台再调用一次模型，提取稳定的用户事实 → 本地 embedding → pgvector
+     后台提取用户原话中的稳定信息 → 本地 embedding → 待确认记忆
+     旧完整问答积累后 → 更新可编辑摘要
 ```
 
 完整聊天记录和给模型使用的上下文分开保存。短期上下文最多取最近 24 条消息，按完整问答及其工具消息做约 12,000 字符裁剪；最新一轮整体保留，可能略超预算。长期记忆按向量相似度先取 12 条候选，过滤后结合重要度选最多 5 条。借鉴了 SillyTavern 将角色设定、聊天历史和按需注入的信息分开处理的思路，未复制其代码。参考：[SillyTavern Prompt 文档](https://github.com/SillyTavern/SillyTavern-Docs/blob/main/Usage/Prompts/index.md)、[World Info 文档](https://github.com/SillyTavern/SillyTavern-Docs/blob/main/Usage/worldinfo.md)。
 
-原作角色资料与用户长期记忆使用不同的表。前者存角色经历、风格和剧情线索，按当前角色名和消息语义检索；后者只存用户事实。角色设定窗口会显示当前角色的资料条数。改变角色名称后，旧角色资料不会注入新角色的聊天。
+原作角色资料与用户长期记忆使用不同的表。前者存角色经历、风格和剧情线索，按当前角色名和消息语义检索；后者区分现实、角色扮演与假设。角色设定窗口会显示当前角色的资料条数。改变角色名称后，旧角色资料不会注入新角色的聊天。
 
 本地已整理的和泉妃爱资料在 `roleplay_data/hiyori_knowledge.jsonl`，是从用户提供的游戏脚本归纳的中文短句，每条保留脚本与行号，不保存原台词。当前共 32 条。修改资料文件后，从 `hiyoribot-backend` 目录运行以下命令重新导入；按来源键更新，重复执行不会增加重复条目：
 
@@ -197,8 +223,9 @@ tts_home: 'E:/unser/q/hiyori_tts'
 - 角色设定：查看与修改名称、描述、性格、背景、说话方式及 System Prompt；每轮请求从数据库读取当前版本并组合成 System 消息。
 - 会话：按会话保存完整的用户和助手消息；网页可切换旧会话或开始新会话。
 - 模型思考：发送框下方默认勾选「显示模型思考」。DeepSeek 的思考文本与正式回复分开流式显示和保存，历史会话中可展开查看；取消勾选会关闭下一轮的思考模式。思考模式可能增加等待时间和 token 用量。
-- 长期记忆：自动提取、手动新增、编辑、合并、调整 1～5 的重要度，以及删除。
-- `POST /chat/stream`：请求体可传 `thinking: true/false`（默认 `true`）；SSE 事件为 `meta`（会话 ID 与召回记忆）、`reasoning_delta`（思考片段）、`delta`（正式回复片段）、`done` 或 `error`。`POST /chat` 返回的 JSON 也包含可选的 `reasoning` 字段。
+- 长期记忆：自动提取候选、查看来源、确认分类和替换、手动新增、编辑、合并、调整 1～5 的重要度，以及删除。
+- `POST /chat/stream`：请求体可传 `thinking: true/false`（默认 `true`，本地模式忽略）、`generation_id`；SSE 包含 `meta`、`reasoning_delta`、`delta`、工具事件、`context_used`、`cancelled`、`done` 或 `error`。`POST /chat` 返回可选的 `reasoning` 和 `recalled_context`。
+- `POST /generation/{id}/cancel`；`GET/POST/PUT /conversations/{id}/summary`；`GET /memories/{id}/conflicts`、`POST /memories/{id}/review`；`POST /tts/jobs`、`GET /tts/jobs/{id}`；`GET /health`。
 - `GET/PUT /character`、`GET /character/knowledge`（角色资料及原作对话条数）、`GET /conversations`、`GET /conversations/{id}/messages`、`GET/POST /memories`、`PUT/DELETE /memories/{id}`、`POST /memories/merge`。
 
 “遗忘”会从长期记忆表删除那条内容，**不会删除原聊天记录**；最近聊天消息仍可能把同一事实带给模型。当前没有多用户隔离与认证，服务请只绑定在本机。
@@ -218,6 +245,6 @@ node --check ..\hiyoribot-frontend\app.js
 
 ```powershell
 $env:RUN_DB_TEST = "1"
-python -m unittest discover -s tests -p test_db_integration.py -v
+python -m unittest discover -s tests -v
 Remove-Item Env:RUN_DB_TEST
 ```

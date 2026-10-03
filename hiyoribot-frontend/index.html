@@ -29,6 +29,7 @@
             <p id="recall-info" class="recall-info">每轮会带上最近消息，并按需召回长期记忆。</p>
             <p id="story-progress-label" class="recall-info">剧情进度未设置，暂不召回原作剧情。</p>
             <button id="story-button" class="secondary" type="button">剧情进度与场景</button>
+            <button id="summary-button" class="secondary" type="button">会话摘要</button>
           </div>
         </header>
 
@@ -44,6 +45,7 @@
           <form id="chat-form">
             <textarea id="message" aria-label="输入消息" placeholder="输入消息…" maxlength="4000" rows="1" required></textarea>
             <button id="send" class="primary" type="submit">发送</button>
+            <button id="stop-generation" class="secondary" type="button" hidden>停止生成</button>
           </form>
           <label class="thinking-toggle" for="thinking-enabled">
             <input id="thinking-enabled" type="checkbox" checked /> 显示模型思考
@@ -56,6 +58,18 @@
         </footer>
       </main>
     </div>
+
+    <dialog id="summary-dialog" class="settings-dialog">
+      <form id="summary-form">
+        <div class="dialog-heading"><h2>会话摘要</h2><button class="icon-button" type="button" data-close="summary-dialog" aria-label="关闭">×</button></div>
+        <p class="hint">摘要用于衔接旧聊天，当前进度与用户说法优先。你可以修正模型整理错的地方；修改剧情进度会清空旧摘要。</p>
+        <label for="conversation-summary">当前情境、约定与待续话题</label>
+        <textarea id="conversation-summary" rows="9" maxlength="1600"></textarea>
+        <p id="summary-info" class="hint"></p>
+        <p id="summary-status" class="dialog-status" role="alert" hidden></p>
+        <div class="dialog-actions"><button id="update-summary" class="secondary" type="button">根据新问答更新</button><button class="primary" type="submit">保存修正</button></div>
+      </form>
+    </dialog>
 
     <dialog id="story-dialog" class="settings-dialog">
       <form id="story-form">
@@ -103,7 +117,9 @@
 
     <dialog id="memory-dialog" class="settings-dialog memory-dialog">
       <div class="dialog-heading"><h2>长期记忆</h2><button class="icon-button" type="button" data-close="memory-dialog" aria-label="关闭">×</button></div>
-      <p class="hint">模型会从用户消息中提取稳定事实；你可以手动新增、编辑、合并或遗忘。“遗忘”仅删除长期记忆，原聊天记录仍保留。</p>
+      <p class="hint">自动提取和旧版本记忆先待确认。现实事实跨会话使用；角色扮演记忆只用于所属会话；临时假设不召回。可能相关的旧记忆由你勾选替换，旧条目保留为已替换。“遗忘”只删除记忆，不删聊天。</p>
+      <label for="memory-filter">显示条目</label>
+      <select id="memory-filter"><option value="active">待确认与已确认</option><option value="pending">待确认</option><option value="confirmed">已确认</option><option value="archive">已替换与不采用</option><option value="all">全部</option></select>
       <p id="memory-status" class="dialog-status" role="alert" hidden></p>
       <div class="dialog-actions"><button id="refresh-memories" class="secondary" type="button">刷新列表</button></div>
       <div id="memory-list" class="memory-list"></div>
@@ -112,9 +128,11 @@
         <h3>手动新增</h3>
         <label for="new-memory">记忆内容</label>
         <textarea id="new-memory" maxlength="300" rows="2" required></textarea>
+        <label for="new-memory-kind">分类</label>
+        <select id="new-memory-kind"><option value="real">现实事实或偏好</option><option value="roleplay">当前会话的角色扮演设定</option><option value="hypothetical">临时假设（不召回）</option></select>
         <label for="new-importance">重要度（1～5）</label>
         <input id="new-importance" type="number" min="1" max="5" value="3" required />
-        <button class="primary" type="submit">添加记忆</button>
+        <button class="primary" type="submit">添加已确认条目</button>
       </form>
 
       <form id="merge-memory-form" class="stacked-form">

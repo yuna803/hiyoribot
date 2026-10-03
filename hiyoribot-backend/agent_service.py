@@ -16,17 +16,31 @@ class AgentError(RuntimeError):
 
 
 def _model_round(client, model: str, messages: list[dict], options: dict,
-                 stream: bool, tool_choice: str | None, config=None) -> Iterator:
+                 stream: bool, tool_choice: str | None, config=None, job=None, recalled_context=None) -> Iterator:
     if config is not None:
         try:
             messages = llm_runtime.fit_messages(messages, config, agent_tools.TOOLS if tool_choice else None)
         except (OSError, ValueError) as exc:
             raise AgentError("本地模型上下文或分词器不可用，请检查设定与模型文件") from exc
     arguments = {"model": model, "messages": list(messages), **options}
+    if job:
+        job.check()
+        job.bind(client.close)
+    if recalled_context is not None:
+        # 在实际裁剪后检查标记；报告传入的参考资料，不声称模型一定遵循。
+        system_text = "\n".join(item["content"] for item in messages if item["role"] == "system")
+        used = {"notes": [row for row in recalled_context.get("notes", []) if f"[{row['source']}]" in system_text],
+                "dialogue": [row for row in recalled_context.get("dialogue", [])
+                             if f"[{row['script_name']} #{row['first_entry']}-{row['last_entry']}]" in system_text],
+                "summary_used": "本会话摘要：" in system_text,
+                "progress": recalled_context.get("progress")}
+        yield "context_used", used
     if tool_choice is not None:
         arguments.update(tools=agent_tools.TOOLS, tool_choice=tool_choice)
     if not stream:
         response = client.chat.completions.create(**arguments)
+        if job:
+            job.check()
         choice = response.choices[0] if response.choices else None
         if choice is None:
             raise AgentError("模型回复为空")
@@ -49,8 +63,12 @@ def _model_round(client, model: str, messages: list[dict], options: dict,
         content, reasoning, assembled = [], [], {}
         finish_reason = None
         response = client.chat.completions.create(**arguments, stream=True)
+        if job:
+            job.bind(getattr(response,"close",client.close))
         try:
             for chunk in response:
+                if job:
+                    job.check()
                 if not chunk.choices:
                     continue
                 choice = chunk.choices[0]
@@ -79,6 +97,8 @@ def _model_round(client, model: str, messages: list[dict], options: dict,
         finally:
             if hasattr(response, "close"):
                 response.close()
+            if job:
+                job.bind(client.close)
         calls = [assembled[index] for index in sorted(assembled)]
         message = {"role": "assistant", "content": "".join(content),
                    "reasoning_content": "".join(reasoning)}
@@ -99,18 +119,34 @@ def _model_round(client, model: str, messages: list[dict], options: dict,
 
 
 def run(client, model: str, messages: list[dict], conversation_id: UUID,
-        character_name: str, options: dict, *, stream: bool, tools_enabled: bool, config=None) -> Iterator:
+        character_name: str, options: dict, *, stream: bool, tools_enabled: bool, config=None,
+        job=None, recalled_context=None) -> Iterator:
     context = [dict(message) for message in messages]
     if tools_enabled:
         context[0]["content"] += "\n\n" + agent_tools.TOOL_PROMPT
-    protocol, trace, thoughts = [], [], []
+    protocol, trace, thoughts, references = [], [], [], []
     cache = {}
     calls_used = 0
     for round_number in range(1, MAX_TOOL_ROUNDS + 2):
         final_only = round_number > MAX_TOOL_ROUNDS or calls_used >= MAX_TOOL_CALLS
         choice = ("none" if final_only else "auto") if tools_enabled else None
         yield "agent_round", {"round": round_number, "final_only": final_only}
-        message = yield from _model_round(client, model, context, options, stream, choice, config)
+        if job:
+            job.check()
+        iterator = _model_round(client, model, context, options, stream, choice, config, job, recalled_context)
+        try:
+            while True:
+                try:
+                    event, data = next(iterator)
+                except StopIteration as completed:
+                    message = completed.value
+                    break
+                if event == "context_used":
+                    data = {"round": round_number, **data}
+                    references.append(data)
+                yield event, data
+        finally:
+            iterator.close()
         protocol.append(message)
         if message["reasoning_content"]:
             thoughts.append(message["reasoning_content"])
@@ -119,12 +155,15 @@ def run(client, model: str, messages: list[dict], conversation_id: UUID,
             if not message["content"].strip():
                 raise AgentError("模型回复为空，未保存这轮聊天")
             yield "complete", {"reply": message["content"], "reasoning": "\n\n".join(thoughts),
-                               "tool_calls": trace, "agent_messages": protocol}
+                               "tool_calls": trace, "agent_messages": protocol,
+                               "recalled_context": {"rounds": references}}
             return
         if not tools_enabled or final_only:
             raise AgentError("模型未遵守工具调用上限，未保存这轮聊天")
         context.append(message)
         for call in calls:
+            if job:
+                job.check()
             name, raw = call["function"]["name"], call["function"]["arguments"]
             try:
                 parsed = json.loads(raw)
@@ -139,7 +178,9 @@ def run(client, model: str, messages: list[dict], conversation_id: UUID,
             elif cached:
                 result = cache[cache_key]
             else:
-                result = agent_tools.execute(name, raw, conversation_id, character_name)
+                progress_snapshot = ({"story_progress":recalled_context["progress"]}
+                                     if recalled_context is not None and "progress" in recalled_context else {})
+                result = agent_tools.execute(name,raw,conversation_id,character_name,**progress_snapshot)
                 cache[cache_key] = result
             calls_used += 1
             record = {**record, "result": result, "cached": cached}

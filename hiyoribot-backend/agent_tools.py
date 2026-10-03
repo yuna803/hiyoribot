@@ -38,6 +38,7 @@ TOOLS = [{"type": "function", "function": {
     "name": name, "description": description, "parameters": arguments.model_json_schema(),
 }} for name, description, arguments in _DEFINITIONS]
 _ARGUMENTS = {name: arguments for name, _description, arguments in _DEFINITIONS}
+_UNSET_PROGRESS = object()
 
 TOOL_PROMPT = """你可以按需要查询工具，再根据结果继续判断是否要查询或回复。
 有关真实时间先查时间；回忆用户事实、旧聊天或原作细节时，已有上下文不足才查询对应工具。
@@ -51,7 +52,8 @@ TOOL_PROMPT = """你可以按需要查询工具，再根据结果继续判断是
 保持角色口吻，不把调用过程写进最终台词，也不要声称使用了未实际调用的工具。"""
 
 
-def execute(name: str, arguments: str, conversation_id: UUID, character_name: str) -> dict:
+def execute(name: str, arguments: str, conversation_id: UUID, character_name: str,
+            *, story_progress=_UNSET_PROGRESS) -> dict:
     """只执行白名单函数；模型不能传入 SQL、文件路径或其他会话 ID。"""
     argument_model = _ARGUMENTS.get(name)
     if argument_model is None:
@@ -70,7 +72,7 @@ def execute(name: str, arguments: str, conversation_id: UUID, character_name: st
         if name == "search_user_memory":
             return {"memories": [{"id": row["id"], "content": row["content"],
                                   "importance": row["importance"]}
-                                 for row in memory_service.recall(parsed.query)]}
+                                 for row in memory_service.recall(parsed.query,conversation_id)]}
         if name == "search_chat_history":
             rows = storage.search_chat_history(conversation_id, parsed.query)
             return {"messages": [{"id": row["id"], "role": row["role"],
@@ -86,7 +88,8 @@ def execute(name: str, arguments: str, conversation_id: UUID, character_name: st
             if conversation is None:
                 return {"error": "当前会话不存在，无法确认剧情进度。"}
             notes, dialogue = story_service.recall(
-                embedding, character_name, conversation.get("story_progress"), notes_limit=3)
+                embedding,character_name,conversation.get("story_progress") if story_progress is _UNSET_PROGRESS else story_progress,
+                notes_limit=3)
         else:
             notes = storage.recall_role_knowledge(embedding, character_name, limit=3) if has_notes else []
             dialogue = []

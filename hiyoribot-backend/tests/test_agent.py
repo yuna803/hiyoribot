@@ -92,7 +92,8 @@ class AgentLoopTests(unittest.TestCase):
             final = self.run_agent(client)[-1][1]
         self.assertIn("error", final["tool_calls"][0]["result"])
         self.assertEqual(final["tool_calls"][1]["result"], {"memories": []})
-        recall.assert_called_once_with("猫")
+        self.assertEqual(recall.call_args.args[0],"猫")
+        self.assertEqual(recall.call_count,1)
 
     def test_noncompliant_model_cannot_start_a_fifth_tool_round(self):
         client = Mock()
@@ -121,7 +122,7 @@ class AgentLoopTests(unittest.TestCase):
         conversation = uuid4()
         config = NS(api_key="test", base_url="https://example.invalid", model="test", auto_extract_memory=False)
         with (patch("main.resolve_config", return_value=config),
-              patch("main.prepare_chat", return_value=(conversation, [{"role": "system", "content": "角色"}], [], "和泉妃爱")),
+              patch("main.prepare_chat", return_value=(conversation, [{"role": "system", "content": "角色"}], [], "和泉妃爱",{})),
               patch("main.OpenAI") as client, patch("storage.save_turn", return_value=42) as save,
               patch("agent_tools.execute", return_value={"messages": []}) as execute):
             client.return_value.__enter__.return_value.chat.completions.create.side_effect = streams
