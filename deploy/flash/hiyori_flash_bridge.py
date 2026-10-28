@@ -1,10 +1,14 @@
 """复用已有NoneBot/OneBot连接加载flash网关，不启动第二个QQ客户端。"""
 import os
+import sys
+from pathlib import Path
 import nonebot
 from nonebot import get_bots,load_plugin
 
 source=os.environ.get('HIYORI_FLASH_GATEWAY_SOURCE','/opt/hiyoribot-flash/current/hiyoribot-qq/hiyori_chat.py')
-if load_plugin(source) is None:
+source=Path(source).resolve()
+sys.path.insert(0,str(source.parent))
+if load_plugin(source.stem) is None:
     raise RuntimeError('flash网关未能加载')
 
 @nonebot.get_app().get('/hiyori-flash/health')
