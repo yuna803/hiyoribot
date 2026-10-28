@@ -186,6 +186,18 @@ class DailyDatabaseTests(unittest.TestCase):
         self.assertEqual(storage.get_conversation(self.first)["summary"],"")
         self.assertEqual(storage.list_messages(self.first)[1]["recalled_context"],{"rounds":[{"dialogue":[]}]})
 
+    def test_reference_scene_edit_preserves_chat_summary(self):
+        from main import AppConfig
+        with storage.connect() as conn:
+            conn.execute("UPDATE conversation SET summary='合成旧话题摘要',summary_revision=7 WHERE id=%s",(self.first,))
+        with patch('main.load_config',return_value=AppConfig(knowledge_mode='reference')):
+            response=TestClient(app).put(f'/conversations/{self.first}/story-progress',json={
+                'scene':'随便聊一会儿','relationship':'兄妹'})
+        self.assertEqual(response.status_code,200)
+        state=storage.get_conversation(self.first)
+        self.assertEqual(state['summary'],'合成旧话题摘要')
+        self.assertEqual(state['summary_revision'],7)
+
 
 if __name__=="__main__":
     unittest.main()

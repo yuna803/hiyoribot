@@ -8,6 +8,17 @@ base_url: "https://api.deepseek.com"
 auto_extract_memory: true
 # 自动提取先进入待确认，确认分类后才召回。旧问答积累到一批后自动生成会话摘要。
 auto_summarize: true
+# 用户画像独立于长期记忆开关；辅助模型随provider运行，从启用后新问答起算。
+profile_enabled: false
+profile_home: 'E:/unser/q/hiyoribot_profiles/web_owner'
+profile_initial_messages: 20
+profile_batch_messages: 50
+# QQ身份由已认证的NoneBot网关提供，按QQ号分别维护画像/好感度。
+qq_enabled: false
+qq_bot_id: ""
+qq_owner_id: ""
+qq_backend_token: ""
+qq_profile_home: 'E:/unser/q/hiyoribot_profiles/qq'
 # 本机或远程 PostgreSQL＋pgvector 连接地址；也可设置 DATABASE_URL 环境变量。
 database_url: ""
 # GPT-SoVITS 试训目录（包含 pilot_v1、env、GPT-SoVITS）；也可用 HIYORI_TTS_HOME。
@@ -18,3 +29,5 @@ local_auxiliary_model: "hiyori-base"
 local_base_url: "http://127.0.0.1:11434/v1"
 local_tokenizer_path: ""
 local_context_tokens: 8192
+# reference：原作只作聊天参考，不要求章节；timeline：按已设置进度严格过滤。
+knowledge_mode: reference

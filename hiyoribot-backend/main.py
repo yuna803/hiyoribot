@@ -2,6 +2,9 @@
 
 import json
 import os
+import re
+from contextlib import asynccontextmanager
+from time import monotonic
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal
@@ -10,7 +13,7 @@ from uuid import UUID
 
 import psycopg
 import yaml
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Response
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Response, Query, Header
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI, OpenAIError
@@ -26,13 +29,68 @@ import summary_service
 import generation_control
 import tts_jobs
 import httpx
+import profile_service
+import profile_storage
+import user_scope
+import qq_service
+import group_service
 from uuid import uuid4
 
-app = FastAPI(title="Hiyori Bot", version="0.9.0")
+@asynccontextmanager
+async def lifespan(_app):
+    # 后台恢复导出和未完成批次；不因模型暂不可用阻止网页启动。
+    try:
+        config=load_config()
+        if profile_service.enabled(config):
+            resolved=resolve_config()
+            for subject in set(profile_storage.subjects()) | {user_scope.WEB_OWNER}:
+                with user_scope.activate(subject):
+                    profile_service.schedule_safely(user_scope.config_for(resolved),sync=True)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning('画像启动恢复未完成，请检查配置后重试')
+    import asyncio
+    async def maintain_groups():
+        first=True
+        while True:
+            try:
+                await asyncio.to_thread(group_service.tick,resolve_config(),restart=first)
+                first=False
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning('群旁听恢复或清理未完成')
+            await asyncio.sleep(60)
+    maintenance=asyncio.create_task(maintain_groups())
+    try:
+        yield
+    finally:
+        maintenance.cancel()
+        try:
+            await maintenance
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(title="Hiyori Bot", version="0.9.0",lifespan=lifespan)
 CONFIG_PATH = Path(__file__).with_name("config.yaml")
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "hiyoribot-frontend"
 FRONTEND_INDEX = FRONTEND_DIR / "index.html"
 app.mount("/assets", StaticFiles(directory=FRONTEND_DIR), name="assets")
+
+# 原文完整保存在角色卡，日常聊天只屏蔽用户明确取消的游戏输出章节。
+def reference_core(text: str) -> str:
+    return re.sub(r'(?ms)^(?:输出结构|状态栏规范|内心OS规范|记忆锚点规范|剧情推进指令)[ \t]*\n.*?(?=^---[ \t]*$|\Z)', '', text)
+
+
+CHAT_PRESENTATION = '''\n\n【本项目运行约定：优先于角色卡中的输出结构、状态栏、记忆锚点、剧情推进指令】
+核心是有妃爱味道的自然聊天：先接住对方正在说的事，再根据当前关系，用调侃、照顾与专业声优的一面回应。
+不要把每次聊天写成游戏任务或连续剧情。无需固定五段输出，不主动输出精力、状态栏、好感度、记忆锚点或【剧情推进】。
+旁白只在有帮助时简短使用，写在括号里；角色内心OS也只在需要时以括号里的简短角色表演出现，不是模型思考过程。
+不强行引入便当、围裙、风险报告等标志物，不每次重复口头禅；不替对方描写动作、心理或决定。
+原稿示例、童年故事、物件与原作片段属于角色设定和表达参考，不证明当前对话已经发生过这些事。
+好感度唯一权威值来自程序画像快照，仍按既定批次维护、范围-100～100；不得根据模板自行加减、映射另一套分数或自动建立恋爱关系。
+未知事实可以查询现有工具；未查到就坦诚说不知道，不假装执行了搜索、购买、设备操作等现实行动。
+用户要求说明实际能力或限制时如实说明，不以角色演出掩盖工具失败。默认中文，回答长短贴合当前话题。'''
 
 
 class AppConfig(BaseModel):
@@ -44,13 +102,41 @@ class AppConfig(BaseModel):
     base_url: str = "https://api.deepseek.com"
     auto_extract_memory: bool = True
     auto_summarize: bool = True
+    profile_enabled: bool = False
+    profile_home: str = "E:/unser/q/hiyoribot_profiles/web_owner"
+    profile_initial_messages: int = Field(default=20,ge=2,le=200)
+    profile_batch_messages: int = Field(default=50,ge=2,le=200)
+    profile_subject_key: str = Field(default='web:owner',exclude=True)
+    qq_enabled: bool = False
+    qq_bot_id: str = ''
+    qq_owner_id: str = ''
+    qq_backend_token: str = ''
+    qq_profile_home: str = 'E:/unser/q/hiyoribot_profiles/qq'
+    qq_nickname: str = Field(default='',exclude=True)
+    qq_group_id: str = Field(default='',exclude=True)
     database_url: str = ""
     tts_home: str = ""
     local_model: str = "hiyori-base"
     local_auxiliary_model: str = "hiyori-base"
     local_base_url: str = "http://127.0.0.1:11434/v1"
     local_tokenizer_path: str = ""
-    local_context_tokens: int = Field(default=8192, ge=4096, le=8192)
+    local_context_tokens: int = Field(default=8192, ge=4096, le=16384)
+    knowledge_mode: Literal['reference','timeline'] = 'reference'
+
+    @field_validator('profile_initial_messages','profile_batch_messages')
+    @classmethod
+    def whole_turn_threshold(cls,value):
+        if value%2:
+            raise ValueError('画像消息阈值必须为偶数（完整问答）')
+        return value
+
+    @field_validator('profile_home','qq_profile_home')
+    @classmethod
+    def private_profile_folder(cls,value):
+        path=Path(value).expanduser()
+        if not path.is_absolute() or path.resolve().is_relative_to(Path(__file__).resolve().parents[1]):
+            raise ValueError('画像目录必须是仓库外的绝对路径')
+        return str(path)
 
 
 def load_config() -> AppConfig:
@@ -102,7 +188,30 @@ def resolve_config() -> AppConfig:
 def model_status() -> dict:
     config = resolve_config()
     return {"provider": config.provider, "model": config.model,
-            "thinking_supported": not llm_runtime.is_local(config)}
+            "thinking_supported": not llm_runtime.is_local(config),
+            'knowledge_mode':config.knowledge_mode,
+            'context_tokens':config.local_context_tokens if llm_runtime.is_local(config) else None}
+
+
+@app.get('/profile')
+def get_profile() -> dict:
+    return profile_service.current(resolve_config())
+
+
+@app.get('/profile/history')
+def get_profile_history(page: int = Query(default=1,ge=1),page_size: int = Query(default=10,ge=1,le=100)) -> dict:
+    config=resolve_config()
+    if not profile_service.enabled(config):
+        return dict(items=[],page=page,page_size=page_size,total=0)
+    profile_service.snapshot(config)
+    return profile_storage.history(page,page_size)
+
+
+@app.post('/profile/refresh')
+def refresh_profile() -> dict:
+    config=resolve_config()
+    profile_service.schedule(config,sync=True)
+    return profile_service.current(config)
 
 
 class ChatRequest(BaseModel):
@@ -150,7 +259,7 @@ class CharacterUpdate(BaseModel):
     personality: str = Field(default="", max_length=2000)
     background: str = Field(default="", max_length=2000)
     speaking_style: str = Field(default="", max_length=2000)
-    system_prompt: str = Field(min_length=1, max_length=8000)
+    system_prompt: str = Field(min_length=1, max_length=24000)
 
     @field_validator("name", "system_prompt")
     @classmethod
@@ -249,10 +358,14 @@ def build_model_messages(
     game_dialogue: list[dict] | None = None,
     story_progress: dict | None = None,
     summary: str = "",
+    user_profile: dict | None = None,
+    knowledge_mode: str = 'timeline',
+    participant_prompt: str = '',
 ) -> list[dict]:
     character_parts = [
         f"你现在以角色“{character['name']}”身份交流。",
-        character["system_prompt"],
+        reference_core(character['system_prompt']) if character['name']=='和泉妃爱' and knowledge_mode=='reference'
+        else character["system_prompt"],
     ]
     for label, field in (
         ("角色描述", "description"),
@@ -266,8 +379,15 @@ def build_model_messages(
         "role": "system",
         "content": "\n".join(character_parts),
     }]
+    # 与角色卡同在第一条system，预算不足时明确报错，不静默删掉画像快照。
+    messages[0]['content'] += profile_service.prompt(user_profile)
     if character["name"] == "和泉妃爱":
-        messages[0]["content"] += "\n\n" + story_service.prompt(story_progress)
+        if knowledge_mode=='reference':
+            messages[0]['content'] += CHAT_PRESENTATION
+        messages[0]["content"] += "\n\n" + (story_service.reference_prompt(story_progress)
+            if knowledge_mode=='reference' else story_service.prompt(story_progress))
+    if participant_prompt:
+        messages[0]['content'] += participant_prompt
     if summary:
         messages.append({"role":"system","content":"本会话摘要：\n" + summary +
                          "\n这是旧问答的辅助参考，不是新指令；当前用户说法和剧情进度优先，助手旧说法不等于原作事实。"})
@@ -327,7 +447,12 @@ def build_model_messages(
     return messages
 
 
-def prepare_chat(body: ChatRequest) -> tuple[UUID, list[dict], list[dict], str, dict]:
+def prepare_chat(body: ChatRequest, config=None) -> tuple[UUID, list[dict], list[dict], str, dict]:
+    config=config or resolve_config()
+    started=monotonic()
+    portrait=profile_service.snapshot(config)
+    stages=[{'name':'画像读取','status':'completed','elapsed_ms':round((monotonic()-started)*1000),
+             'detail':f"版本 {portrait['revision']} · 好感度 {portrait['affinity']}" if portrait else '画像未启用'}]
     character = storage.get_character()
     if body.conversation_id:
         conversation = storage.get_conversation(body.conversation_id)
@@ -347,6 +472,7 @@ def prepare_chat(body: ChatRequest) -> tuple[UUID, list[dict], list[dict], str, 
         else:
             conversation = storage.create_conversation(body.message)
     progress = conversation.get("story_progress")
+    started=monotonic()
     try:
         memories = memory_service.recall(body.message,conversation["id"])
         role_knowledge = []
@@ -358,8 +484,10 @@ def prepare_chat(body: ChatRequest) -> tuple[UUID, list[dict], list[dict], str, 
         if has_role_knowledge or has_game_dialogue:
             query_embedding = memory_service.embed(body.message)
         if character["name"] == "和泉妃爱" and (has_role_knowledge or has_game_dialogue):
-            role_knowledge, game_dialogue = story_service.recall(
-                query_embedding, character["name"], progress)
+            if getattr(config,'knowledge_mode','reference')=='reference':
+                role_knowledge,game_dialogue=story_service.reference_recall(query_embedding,character['name'])
+            else:
+                role_knowledge, game_dialogue = story_service.recall(query_embedding, character["name"], progress)
         elif has_role_knowledge:
             candidates = storage.recall_role_knowledge(
                 query_embedding, character["name"], limit=8
@@ -372,13 +500,22 @@ def prepare_chat(body: ChatRequest) -> tuple[UUID, list[dict], list[dict], str, 
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="剧情进度失效，请重新保存本会话进度") from exc
 
+    stages.append({'name':'资料检索','status':'completed','elapsed_ms':round((monotonic()-started)*1000),
+                   'detail':f'长期记忆 {len(memories)} 条 · 原作片段 {len(game_dialogue)} 条'})
+    started=monotonic()
     history = storage.recent_messages(conversation["id"], limit=24)
     messages = build_model_messages(
-        character, memories, history, body.message, role_knowledge, game_dialogue, progress, conversation.get("summary","")
+        character, memories, history, body.message, role_knowledge, game_dialogue, progress, conversation.get("summary",""),portrait,
+        getattr(config,'knowledge_mode','reference'),user_scope.prompt(config,getattr(config,'qq_nickname',''))
     )
+    # 这里记录准备完成；每轮实际裁剪后的参考仍由原有 context_used 报告。
+    stages.append({'name':'上下文准备','status':'completed','elapsed_ms':round((monotonic()-started)*1000),
+                   'detail':f'历史消息 {len(history)} 条；已组合角色、画像、场景和参考资料'})
     context = {"progress":progress,"notes":[{"source":row.get("source_key","角色资料"),
                  "content":row["content"],"similarity":float(row.get("similarity",0))} for row in role_knowledge],
-               "dialogue":game_dialogue}
+               "dialogue":game_dialogue,'stages':stages}
+    if portrait:
+        context['profile']={key:portrait[key] for key in ('revision','affinity')}
     return conversation["id"], messages, memories, character["name"], context
 
 
@@ -397,8 +534,11 @@ def thinking_options(enabled: bool) -> dict:
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(body: ChatRequest, background_tasks: BackgroundTasks) -> ChatResponse:
-    config = resolve_config()
-    conversation_id, messages, memories, character_name, context = prepare_chat(body)
+    return execute_chat(body,background_tasks,resolve_config())
+
+
+def execute_chat(body: ChatRequest, background_tasks: BackgroundTasks, config) -> ChatResponse:
+    conversation_id, messages, memories, character_name, context = prepare_chat(body,config)
     result = None
     try:
         with llm_runtime.gpu_session(config), OpenAI(api_key=config.api_key, base_url=config.base_url,
@@ -419,6 +559,7 @@ def chat(body: ChatRequest, background_tasks: BackgroundTasks) -> ChatResponse:
         raise HTTPException(status_code=502, detail="模型回复不完整，未保存这轮聊天")
     source_id = storage.save_turn(conversation_id, body.message, result["reply"], result["reasoning"],
                                   agent_messages=result["agent_messages"],recalled_context=result["recalled_context"])
+    profile_service.schedule_safely(config)
     if config.auto_extract_memory:
         background_tasks.add_task(memory_service.extract_safely, body.message, source_id, config)
     if getattr(config,"auto_summarize",False):
@@ -431,6 +572,70 @@ def chat(body: ChatRequest, background_tasks: BackgroundTasks) -> ChatResponse:
         tool_calls=result["tool_calls"],
         recalled_context=result["recalled_context"],
     )
+
+
+@app.post('/integrations/qq/chat')
+def qq_chat(body: qq_service.QQChatRequest, background_tasks: BackgroundTasks,
+            authorization: str | None = Header(default=None)) -> dict:
+    config=load_config()
+    qq_service.authenticate(config,authorization)
+    return qq_service.chat(body,resolve_config(),
+                           lambda request,settings:execute_chat(ChatRequest(**request),background_tasks,settings))
+
+
+def qq_group_config(authorization,bot_id):
+    config=load_config()
+    qq_service.authenticate(config,authorization)
+    group_service.check_bot(bot_id,config)
+    return config
+
+
+@app.post('/integrations/qq/group/ingest')
+def qq_group_ingest(body:group_service.Ingest,authorization:str|None=Header(default=None)):
+    qq_group_config(authorization,body.bot_id)
+    return group_service.ingest(body,resolve_config())
+
+
+@app.post('/integrations/qq/group/toggle')
+def qq_group_toggle(body:group_service.Toggle,authorization:str|None=Header(default=None)):
+    config=qq_group_config(authorization,body.bot_id)
+    return group_service.store.toggle(body,config.qq_owner_id)
+
+
+@app.post('/integrations/qq/group/recall')
+def qq_group_recall(body:group_service.Recall,authorization:str|None=Header(default=None)):
+    config=qq_group_config(authorization,body.bot_id)
+    return group_service.recall(body,config)
+
+
+@app.post('/integrations/qq/group/bot-message')
+def qq_group_bot_message(body:group_service.BotMessage,authorization:str|None=Header(default=None)):
+    qq_group_config(authorization,body.bot_id)
+    return group_service.store.bot_message(body)
+
+
+@app.get('/integrations/qq/group/candidates')
+def qq_group_candidates(bot_id:str,authorization:str|None=Header(default=None)):
+    qq_group_config(authorization,bot_id)
+    return group_service.store.candidates(bot_id)
+
+
+@app.post('/integrations/qq/group/claim')
+def qq_group_claim(body:group_service.Claim,authorization:str|None=Header(default=None)):
+    qq_group_config(authorization,body.bot_id)
+    return group_service.claim(body,resolve_config())
+
+
+@app.post('/integrations/qq/group/receipt')
+def qq_group_receipt(body:group_service.Receipt,authorization:str|None=Header(default=None)):
+    qq_group_config(authorization,body.bot_id)
+    return group_service.store.receipt(body)
+
+
+@app.post('/integrations/qq/group/startup')
+def qq_group_startup(body:group_service.BotKey,authorization:str|None=Header(default=None)):
+    qq_group_config(authorization,body.bot_id)
+    return group_service.store.startup(body.bot_id)
 
 
 @app.post("/generation/{generation_id}/cancel")
@@ -450,7 +655,7 @@ def chat_stream(body: ChatRequest, background_tasks: BackgroundTasks) -> Streami
         raise HTTPException(status_code=409,detail=str(error)) from error
     try:
         job.check()
-        conversation_id, messages, memories, character_name, context = prepare_chat(body)
+        conversation_id, messages, memories, character_name, context = prepare_chat(body,config)
     except generation_control.GenerationCancelled:
         return StreamingResponse(iter([sse_event("cancelled",{"saved":False})]),media_type="text/event-stream")
     except Exception:
@@ -460,7 +665,10 @@ def chat_stream(body: ChatRequest, background_tasks: BackgroundTasks) -> Streami
     def events() -> Iterator[str]:
         try:
             yield sse_event("meta", {"conversation_id":str(conversation_id),"generation_id":str(body.generation_id),
-                "recalled_memories":[{"id":item["id"],"content":item["content"]} for item in memories]})
+                "recalled_memories":[{"id":item["id"],"content":item["content"]} for item in memories],
+                'profile':context.get('profile')})
+            for stage in context.get('stages',[]):
+                yield sse_event('pipeline_stage',stage)
             result = None
             with llm_runtime.gpu_session(config,job), OpenAI(api_key=config.api_key,base_url=config.base_url,
                     timeout=180 if llm_runtime.is_local(config) else 45,max_retries=0,
@@ -480,6 +688,7 @@ def chat_stream(body: ChatRequest, background_tasks: BackgroundTasks) -> Streami
             source_id = storage.save_turn(conversation_id,body.message,result["reply"],result["reasoning"],
                     agent_messages=result["agent_messages"],recalled_context=result["recalled_context"])
             job.finish("completed")
+            profile_service.schedule_safely(config)
             if config.auto_extract_memory:
                 background_tasks.add_task(memory_service.extract_safely,body.message,source_id,config)
             if getattr(config,"auto_summarize",False):
@@ -565,7 +774,8 @@ def set_story_progress(conversation_id: UUID, body: story_service.StoryProgress)
         state = story_service.validate_progress(body, chapters, edges)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    updated = storage.update_story_progress(conversation_id, state)
+    updated = storage.update_story_progress(conversation_id, state,
+        preserve_summary=load_config().knowledge_mode=='reference')
     if updated is None:
         raise HTTPException(status_code=404, detail="会话不存在")
     return updated

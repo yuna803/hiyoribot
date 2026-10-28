@@ -15,6 +15,9 @@ config.yaml
 *.dump
 *.backup
 *.partial
+hiyoribot_profiles/
+profile.json
+profile.md
 
 # 游戏原始资源只保留在本机，仓库仅放整理后的简短角色资料
 *.pfs

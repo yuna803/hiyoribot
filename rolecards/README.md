@@ -1,6 +1,8 @@
 # 和泉妃爱角色卡
 
-`izumi-hiyori.json` 的字段与后端 `PUT /character` 一致。资料来自[游戏官方角色页](https://imel.co.jp/hamidashi/character)和[动画官方角色介绍](https://hcanime.com/)；性格和对话规则经过整理，属于本项目的扮演设定，不是官方台词。
+`izumi-hiyori.json` 的字段与后端 `PUT /character` 一致。当前System Prompt完整保存用户提供的 `E:\unser\Desktop\prompt.txt`，属于本项目采用的人设模板，不把其中补写的经历当作官方考据。
+
+默认日常聊天模式 `knowledge_mode: reference` 会保留人设、互动风格和背景，屏蔽原稿固定输出结构、状态栏/OS/记忆锚点规范与剧情推进指令，使用自然聊天运行约定。旁白和角色OS按需，状态留在面板；程序画像中的好感度是唯一权威分数。全文留在角色卡和数据库中，便于查看、恢复和继续修改。
 
 ## 使用
 
@@ -10,8 +12,8 @@
 Invoke-RestMethod -Method Put -Uri 'http://127.0.0.1:8000/character' -ContentType 'application/json; charset=utf-8' -InFile '.\rolecards\izumi-hiyori.json'
 ```
 
-角色卡现在固定对话者为和泉智宏。第一条消息只需交代场景，例如：
+角色卡固定对话者为和泉智宏（哥哥），可以直接聊工作、生活或心情，无需先选择原作章节。也可以可选地交代场景，例如：
 
 > 放学后，我回到家，看到你正整理桌上的录音台本：“今天工作还顺利吗？”
 
-当前长期记忆提取针对用户真实信息，角色扮演时建议在本地 `hiyoribot-backend/config.yaml` 中设置 `auto_extract_memory: false`，避免把剧情台词存成用户事实。角色卡仍需要 PostgreSQL 连接才能通过当前网页/API 保存。
+长期记忆自动提取与用户画像是两个独立功能。画像按批次更新并区分现实、角色扮演和推测；当前长期记忆自动提取关闭，手动管理和已有记忆召回仍可用。角色卡通过网页/API保存到PostgreSQL；修改JSON文件后需要重新导入才会生效。

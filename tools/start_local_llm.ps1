@@ -1,4 +1,4 @@
-param([string]$LocalHome = 'E:\unser\q\hiyori_llm')
+param([string]$LocalHome = 'E:\unser\q\hiyori_llm', [ValidateRange(4096,16384)][int]$ContextTokens = 16384)
 
 $ErrorActionPreference = 'Stop'
 $executable = Join-Path $LocalHome 'ollama\ollama.exe'
@@ -13,7 +13,7 @@ try {
 # 只影响本次启动的子进程；不修改系统环境变量。
 $env:OLLAMA_HOST = '127.0.0.1:11434'
 $env:OLLAMA_MODELS = Join-Path $LocalHome 'models'
-$env:OLLAMA_CONTEXT_LENGTH = '8192'
+$env:OLLAMA_CONTEXT_LENGTH = [string]$ContextTokens
 $env:OLLAMA_NUM_PARALLEL = '1'
 $env:OLLAMA_MAX_LOADED_MODELS = '1'
 $env:OLLAMA_FLASH_ATTENTION = '1'

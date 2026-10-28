@@ -105,7 +105,7 @@ def main() -> None:
             print("正在启动本机模型服务。", flush=True)
             model_home = LOCAL_HOME / "hiyori_llm"
             env = {**os.environ, "OLLAMA_HOST": url.netloc, "OLLAMA_MODELS": str(model_home / "models"),
-                   "OLLAMA_CONTEXT_LENGTH": "8192", "OLLAMA_NUM_PARALLEL": "1", "OLLAMA_MAX_LOADED_MODELS": "1",
+                   "OLLAMA_CONTEXT_LENGTH": str(config.get('local_context_tokens',8192)), "OLLAMA_NUM_PARALLEL": "1", "OLLAMA_MAX_LOADED_MODELS": "1",
                    "OLLAMA_FLASH_ATTENTION": "1", "OLLAMA_KV_CACHE_TYPE": "q8_0", "OLLAMA_NO_CLOUD": "1"}
             start_process([str(model_home / "ollama/ollama.exe"), "serve"], "ollama", env)
             wait_ready(endpoint)

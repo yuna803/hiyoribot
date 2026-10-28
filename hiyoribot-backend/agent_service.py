@@ -1,6 +1,7 @@
 """有限轮次的模型→工具→模型循环，两种聊天接口共用。"""
 
 import json
+from time import monotonic
 from collections.abc import Iterator
 from uuid import UUID
 
@@ -125,6 +126,7 @@ def run(client, model: str, messages: list[dict], conversation_id: UUID,
     if tools_enabled:
         context[0]["content"] += "\n\n" + agent_tools.TOOL_PROMPT
     protocol, trace, thoughts, references = [], [], [], []
+    stages=list((recalled_context or {}).get('stages',[]))
     cache = {}
     calls_used = 0
     for round_number in range(1, MAX_TOOL_ROUNDS + 2):
@@ -133,6 +135,7 @@ def run(client, model: str, messages: list[dict], conversation_id: UUID,
         yield "agent_round", {"round": round_number, "final_only": final_only}
         if job:
             job.check()
+        round_started=monotonic()
         iterator = _model_round(client, model, context, options, stream, choice, config, job, recalled_context)
         try:
             while True:
@@ -151,12 +154,20 @@ def run(client, model: str, messages: list[dict], conversation_id: UUID,
         if message["reasoning_content"]:
             thoughts.append(message["reasoning_content"])
         calls = message.get("tool_calls", [])
+        stage={'name':'工具选择','status':'completed','elapsed_ms':round((monotonic()-round_started)*1000),
+               'detail':f'第 {round_number} 轮：选择 {len(calls)} 个工具' if calls else f'第 {round_number} 轮：直接回复'}
+        stages.append(stage)
+        yield 'pipeline_stage',stage
         if not calls:
             if not message["content"].strip():
                 raise AgentError("模型回复为空，未保存这轮聊天")
+            extra={key:recalled_context[key] for key in ('profile',) if key in (recalled_context or {})}
+            context_record={"rounds":references,**extra}
+            if stages:
+                context_record['stages']=stages
             yield "complete", {"reply": message["content"], "reasoning": "\n\n".join(thoughts),
                                "tool_calls": trace, "agent_messages": protocol,
-                               "recalled_context": {"rounds": references}}
+                               "recalled_context": context_record}
             return
         if not tools_enabled or final_only:
             raise AgentError("模型未遵守工具调用上限，未保存这轮聊天")
@@ -173,6 +184,7 @@ def run(client, model: str, messages: list[dict], conversation_id: UUID,
             record = {"id": call["id"], "round": round_number, "name": name, "arguments": parsed}
             yield "tool_start", record
             cached = cache_key in cache
+            started=monotonic()
             if calls_used >= MAX_TOOL_CALLS:
                 result = {"error": "本轮工具次数已用完，请根据已有结果直接回复。"}
             elif cached:
@@ -180,9 +192,15 @@ def run(client, model: str, messages: list[dict], conversation_id: UUID,
             else:
                 progress_snapshot = ({"story_progress":recalled_context["progress"]}
                                      if recalled_context is not None and "progress" in recalled_context else {})
-                result = agent_tools.execute(name,raw,conversation_id,character_name,**progress_snapshot)
+                mode=({'knowledge_mode':config.knowledge_mode} if config is not None and hasattr(config,'knowledge_mode') else {})
+                result = agent_tools.execute(name,raw,conversation_id,character_name,**progress_snapshot,**mode)
                 cache[cache_key] = result
             calls_used += 1
+            stage={'name':'联网搜索' if name=='search_web' else '知识库检索' if name.startswith('search_') else '工具执行',
+                   'status':'completed','elapsed_ms':round((monotonic()-started)*1000),
+                   'detail':f"{name}：{'失败' if 'error' in result else '完成'}{'（本轮缓存）' if cached else ''}"}
+            stages.append(stage)
+            yield 'pipeline_stage',stage
             record = {**record, "result": result, "cached": cached}
             trace.append(record)
             yield "tool_result", record

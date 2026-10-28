@@ -11,6 +11,7 @@ import memory_service
 import storage
 import web_search
 import story_service
+import user_scope
 
 
 class EmptyArguments(BaseModel):
@@ -53,7 +54,7 @@ TOOL_PROMPT = """你可以按需要查询工具，再根据结果继续判断是
 
 
 def execute(name: str, arguments: str, conversation_id: UUID, character_name: str,
-            *, story_progress=_UNSET_PROGRESS) -> dict:
+            *, story_progress=_UNSET_PROGRESS, knowledge_mode: str = 'timeline') -> dict:
     """只执行白名单函数；模型不能传入 SQL、文件路径或其他会话 ID。"""
     argument_model = _ARGUMENTS.get(name)
     if argument_model is None:
@@ -69,6 +70,19 @@ def execute(name: str, arguments: str, conversation_id: UUID, character_name: st
                     "timezone": "Asia/Shanghai", "weekday": "星期" + "一二三四五六日"[now.weekday()]}
         if name == "search_web":
             return web_search.search(parsed.query, parsed.timelimit)
+        public=user_scope.public_group()
+        if public and name in ('search_user_memory','search_chat_history'):
+            import group_storage
+            bot,group=public
+            if name=='search_user_memory':
+                return {'public_observations':[o for o in group_storage.public_profiles(bot,group)
+                                               if parsed.query.casefold() in o['text'].casefold()][:10]}
+            # 此工具只检索本群仍在7天保留期内的原文；不能访问个人会话。
+            with storage.connect() as conn:
+                rows=conn.execute('''SELECT id,user_id,nickname,content FROM qq_group_message
+                    WHERE bot_id=%s AND group_id=%s AND NOT recalled AND content IS NOT NULL
+                    AND strpos(lower(content),lower(%s))>0 ORDER BY id DESC LIMIT 10''',(bot,group,parsed.query)).fetchall()
+            return {'messages':[{**r,'content':r['content'][:600]} for r in reversed(rows)]}
         if name == "search_user_memory":
             return {"memories": [{"id": row["id"], "content": row["content"],
                                   "importance": row["importance"]}
@@ -83,7 +97,9 @@ def execute(name: str, arguments: str, conversation_id: UUID, character_name: st
         if not has_notes and not has_dialogue:
             return {"character": character_name, "notes": [], "dialogue": []}
         embedding = memory_service.embed(parsed.query)
-        if character_name == "和泉妃爱":
+        if character_name == "和泉妃爱" and knowledge_mode=='reference':
+            notes,dialogue=story_service.reference_recall(embedding,character_name,notes_limit=3)
+        elif character_name == "和泉妃爱":
             conversation = storage.get_conversation(conversation_id)
             if conversation is None:
                 return {"error": "当前会话不存在，无法确认剧情进度。"}

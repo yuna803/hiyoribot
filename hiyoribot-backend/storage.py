@@ -1,4 +1,4 @@
-"""单用户聊天与记忆的 PostgreSQL 存储。"""
+"""按请求身份隔离聊天与记忆的 PostgreSQL 存储。"""
 
 import math
 import hashlib
@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 import yaml
+import user_scope
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -39,15 +40,15 @@ def init_db() -> None:
     global _initialized
     with _open_connection() as conn:
         conn.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
-        legacy = conn.execute("SELECT id,content,kind,conversation_id FROM memory WHERE dedup_key IS NULL AND status IN ('pending','confirmed')").fetchall()
+        legacy = conn.execute("SELECT id,content,kind,conversation_id,subject_key FROM memory WHERE dedup_key IS NULL AND status IN ('pending','confirmed')").fetchall()
         for row in legacy:
             conn.execute("UPDATE memory SET dedup_key=%s WHERE id=%s",
-                         (memory_key(row["content"], row["kind"], row["conversation_id"]), row["id"]))
+                         (memory_key(row["content"], row["kind"], row["conversation_id"],subject_key=row['subject_key']), row["id"]))
     _initialized = True
 
 
 def connect() -> psycopg.Connection:
-    # ponytail: 单用户阶段每次操作新建连接；并发用户增多时再加连接池。
+    # ponytail: 每次操作新建连接；连接开销成为瓶颈后再加有界连接池。
     if not _initialized:
         with _schema_lock:
             if not _initialized:
@@ -89,25 +90,25 @@ def create_conversation(first_message: str, story_progress: dict | None = None) 
     title = first_message[:40]
     with connect() as conn:
         return conn.execute(
-            """INSERT INTO conversation (id, title, story_progress) VALUES (%s, %s, %s)
-               RETURNING id, title, story_progress, created_at, updated_at""",
-            (conversation_id, title, Jsonb(story_progress) if story_progress is not None else None),
+            """INSERT INTO conversation (id,title,story_progress,subject_key) VALUES (%s,%s,%s,%s)
+               RETURNING id,title,story_progress,subject_key,created_at,updated_at""",
+            (conversation_id,title,Jsonb(story_progress) if story_progress is not None else None,user_scope.subject()),
         ).fetchone()
 
 
 def get_conversation(conversation_id: UUID) -> dict | None:
     with connect() as conn:
         return conn.execute(
-            "SELECT id, title, story_progress, summary, summary_origin,summary_through_id, summary_revision, created_at, updated_at FROM conversation WHERE id = %s",
-            (conversation_id,),
+            "SELECT id,title,story_progress,summary,summary_origin,summary_through_id,summary_revision,subject_key,created_at,updated_at FROM conversation WHERE id=%s AND subject_key=%s",
+            (conversation_id,user_scope.subject()),
         ).fetchone()
 
 
 def list_conversations() -> list[dict]:
     with connect() as conn:
         return conn.execute(
-            """SELECT id, title, created_at, updated_at FROM conversation
-               ORDER BY updated_at DESC"""
+            """SELECT id,title,created_at,updated_at FROM conversation WHERE subject_key=%s
+               ORDER BY updated_at DESC""", (user_scope.subject(),)
         ).fetchall()
 
 
@@ -115,17 +116,18 @@ def list_messages(conversation_id: UUID) -> list[dict]:
     with connect() as conn:
         return conn.execute(
             """SELECT id, role, content, reasoning, agent_messages, recalled_context, created_at FROM message
-               WHERE conversation_id = %s ORDER BY id""",
-            (conversation_id,),
+               WHERE conversation_id=%s AND conversation_id IN (SELECT id FROM conversation WHERE subject_key=%s) ORDER BY id""",
+            (conversation_id,user_scope.subject()),
         ).fetchall()
 
 
 def recent_messages(conversation_id: UUID, limit: int = 20) -> list[dict]:
     with connect() as conn:
         rows = conn.execute(
-            """SELECT role, content, reasoning, agent_messages FROM message WHERE conversation_id = %s
+            """SELECT role,content,reasoning,agent_messages FROM message WHERE conversation_id=%s
+               AND conversation_id IN (SELECT id FROM conversation WHERE subject_key=%s)
                ORDER BY id DESC LIMIT %s""",
-            (conversation_id, limit),
+            (conversation_id,user_scope.subject(),limit),
         ).fetchall()
     return list(reversed(rows))
 
@@ -136,8 +138,8 @@ def search_chat_history(conversation_id: UUID, query: str, limit: int = 6) -> li
     with connect() as conn:
         rows = conn.execute(
             """SELECT id, role, content FROM message
-               WHERE conversation_id = %s AND content ILIKE %s
-               ORDER BY id DESC LIMIT %s""", (conversation_id, pattern, limit),
+               WHERE conversation_id=%s AND conversation_id IN (SELECT id FROM conversation WHERE subject_key=%s) AND content ILIKE %s
+               ORDER BY id DESC LIMIT %s""", (conversation_id,user_scope.subject(),pattern,limit),
         ).fetchall()
     return list(reversed(rows))
 
@@ -149,16 +151,25 @@ def save_turn(
 ) -> int:
     # 两条消息在同一事务中写入，不留下半轮成功记录。
     with connect() as conn:
+        # 与画像起算共用事务锁，保证提交顺序与 completed_turn 游标一致。
+        conn.execute("SELECT pg_advisory_xact_lock(721041)")
+        if not conn.execute('SELECT id FROM conversation WHERE id=%s AND subject_key=%s',
+                            (conversation_id,user_scope.subject())).fetchone():
+            raise ValueError('会话不属于当前用户')
         user = conn.execute(
             """INSERT INTO message (conversation_id, role, content)
                VALUES (%s, 'user', %s) RETURNING id""",
             (conversation_id, user_text),
         ).fetchone()
-        conn.execute(
+        assistant = conn.execute(
             """INSERT INTO message (conversation_id, role, content, reasoning, agent_messages, recalled_context)
-               VALUES (%s, 'assistant', %s, %s, %s, %s)""",
+               VALUES (%s, 'assistant', %s, %s, %s, %s) RETURNING id""",
             (conversation_id, assistant_text, reasoning or None,
              Jsonb(agent_messages) if agent_messages else None, Jsonb(recalled_context) if recalled_context else None),
+        ).fetchone()
+        conn.execute(
+            "INSERT INTO completed_turn (conversation_id,user_message_id,assistant_message_id,subject_key) VALUES (%s,%s,%s,%s)",
+            (conversation_id,user["id"],assistant["id"],user_scope.subject()),
         )
         conn.execute(
             "UPDATE conversation SET updated_at = now() WHERE id = %s",
@@ -175,27 +186,51 @@ def list_memories() -> list[dict]:
                       s.content AS source_text,s.conversation_id AS source_conversation_id,c.title AS conversation_title
                FROM memory m LEFT JOIN message s ON s.id=m.source_message_id
                LEFT JOIN conversation c ON c.id=coalesce(m.conversation_id,s.conversation_id)
-               ORDER BY (m.status='pending') DESC,m.importance DESC,m.updated_at DESC"""
+               WHERE m.subject_key=%s ORDER BY (m.status='pending') DESC,m.importance DESC,m.updated_at DESC""",(user_scope.subject(),)
         ).fetchall()
+
+
+def _group_id(conn, conversation_id: UUID | None) -> str:
+    if conversation_id is None or not user_scope.subject().startswith('qq:'):
+        return ''
+    row=conn.execute('''SELECT q.group_id FROM qq_session q JOIN conversation c ON c.id=q.conversation_id
+                        WHERE q.conversation_id=%s AND c.subject_key=%s''',
+                     (conversation_id,user_scope.subject())).fetchone()
+    return row['group_id'] if row else ''
+
+
+def group_evidence_ids(message_ids: list[int], group_id: str) -> set[int]:
+    with connect() as conn:
+        rows=conn.execute('''SELECT m.id FROM message m JOIN conversation c ON c.id=m.conversation_id
+                            JOIN qq_session q ON q.conversation_id=c.id
+                            WHERE m.id=ANY(%s) AND c.subject_key=%s AND q.group_id=%s''',
+                          (message_ids,user_scope.subject(),group_id)).fetchall()
+    return {row['id'] for row in rows}
 
 
 def memory_count(conversation_id: UUID | None = None) -> int:
     with connect() as conn:
-        return conn.execute("""SELECT count(*) AS count FROM memory WHERE status='confirmed'
-                            AND (kind='real' OR (kind='roleplay' AND conversation_id=%s))""",
-                            (conversation_id,)).fetchone()["count"]
+        group_id=_group_id(conn,conversation_id)
+        return conn.execute("""SELECT count(*) AS count FROM memory WHERE subject_key=%s AND status='confirmed'
+                            AND (kind='real' OR (kind='roleplay' AND conversation_id=%s))
+                            AND (%s='' OR source_message_id IN (SELECT m.id FROM message m
+                                 JOIN qq_session q ON q.conversation_id=m.conversation_id WHERE q.group_id=%s))""",
+                            (user_scope.subject(),conversation_id,group_id,group_id)).fetchone()["count"]
 
 
 def recall_memories(embedding: list[float], limit: int = 8, conversation_id: UUID | None = None) -> list[dict]:
     vector = vector_literal(embedding)
     with connect() as conn:
+        group_id=_group_id(conn,conversation_id)
         return conn.execute(
             """SELECT id, content, importance,kind,conversation_id,
                       1 - (embedding <=> %s::vector) AS similarity
-               FROM memory WHERE status='confirmed'
+               FROM memory WHERE subject_key=%s AND status='confirmed'
                  AND (kind='real' OR (kind='roleplay' AND conversation_id=%s))
+                 AND (%s='' OR source_message_id IN (SELECT m.id FROM message m
+                      JOIN qq_session q ON q.conversation_id=m.conversation_id WHERE q.group_id=%s))
                ORDER BY embedding <=> %s::vector LIMIT %s""",
-            (vector, conversation_id, vector, limit),
+            (vector,user_scope.subject(),conversation_id,group_id,group_id,vector,limit),
         ).fetchall()
 
 
@@ -278,8 +313,11 @@ def story_graph() -> tuple[list[dict], list[dict]]:
     return chapters, edges
 
 
-def update_story_progress(conversation_id: UUID, progress: dict) -> dict | None:
+def update_story_progress(conversation_id: UUID, progress: dict, *, preserve_summary: bool = False) -> dict | None:
     with connect() as conn:
+        if preserve_summary:
+            return conn.execute('''UPDATE conversation SET story_progress=%s,updated_at=now()
+                WHERE id=%s RETURNING id,title,story_progress''',(Jsonb(progress),conversation_id)).fetchone()
         return conn.execute(
             """UPDATE conversation SET story_progress = %s,
                summary=CASE WHEN story_progress IS DISTINCT FROM %s THEN '' ELSE summary END,
@@ -311,8 +349,11 @@ def expand_game_dialogue(hits: list[dict], bounds: dict[str, int]) -> list[dict]
     return result
 
 
-def memory_key(content: str, kind: str, conversation_id: UUID | None) -> str:
-    return hashlib.sha256(f"{kind}\0{conversation_id or ''}\0{content.strip()}".encode()).hexdigest()
+def memory_key(content: str, kind: str, conversation_id: UUID | None, *, subject_key: str | None = None) -> str:
+    key=subject_key or user_scope.subject()
+    # 网页历史去重键保持兼容；QQ用户加入身份前缀，允许不同用户有相同偏好。
+    prefix='' if key==user_scope.WEB_OWNER else key+'\0'
+    return hashlib.sha256(f"{prefix}{kind}\0{conversation_id or ''}\0{content.strip()}".encode()).hexdigest()
 
 
 def add_memory(
@@ -320,6 +361,13 @@ def add_memory(
     *, kind: str = "real", status: str = "confirmed", conversation_id: UUID | None = None, fact_key: str = ""
 ) -> dict:
     with connect() as conn:
+        if source_message_id is not None and not conn.execute('''SELECT m.id FROM message m
+                JOIN conversation c ON c.id=m.conversation_id WHERE m.id=%s AND c.subject_key=%s''',
+                (source_message_id,user_scope.subject())).fetchone():
+            raise ValueError('记忆来源不属于当前用户')
+        if conversation_id is not None and not conn.execute('SELECT id FROM conversation WHERE id=%s AND subject_key=%s',
+                (conversation_id,user_scope.subject())).fetchone():
+            raise ValueError('记忆会话不属于当前用户')
         if kind == "roleplay" and conversation_id is None and source_message_id is not None:
             source = conn.execute("SELECT conversation_id FROM message WHERE id=%s", (source_message_id,)).fetchone()
             conversation_id = source["conversation_id"] if source else None
@@ -328,14 +376,14 @@ def add_memory(
         if kind != "roleplay":
             conversation_id = None
         return conn.execute(
-            """INSERT INTO memory (content,importance,embedding,source_message_id,kind,status,conversation_id,fact_key,dedup_key)
-               VALUES (%s,%s,%s::vector,%s,%s,%s,%s,%s,%s)
+            """INSERT INTO memory (content,importance,embedding,source_message_id,kind,status,conversation_id,fact_key,dedup_key,subject_key)
+               VALUES (%s,%s,%s::vector,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (dedup_key) DO UPDATE SET
                  importance = greatest(memory.importance, EXCLUDED.importance),
                  updated_at = now()
                RETURNING id,content,importance,source_message_id,kind,status,conversation_id,fact_key,created_at,updated_at""",
             (content, importance, vector_literal(embedding), source_message_id,kind,status,conversation_id,fact_key,
-             memory_key(content,kind,conversation_id) if status in ("pending", "confirmed") else None),
+             memory_key(content,kind,conversation_id) if status in ("pending", "confirmed") else None,user_scope.subject()),
         ).fetchone()
 
 
@@ -343,7 +391,7 @@ def update_memory(
     memory_id: int, content: str, importance: int, embedding: list[float]
 ) -> dict | None:
     with connect() as conn:
-        row = conn.execute("SELECT kind,status,conversation_id FROM memory WHERE id=%s FOR UPDATE", (memory_id,)).fetchone()
+        row = conn.execute("SELECT kind,status,conversation_id FROM memory WHERE id=%s AND subject_key=%s FOR UPDATE", (memory_id,user_scope.subject())).fetchone()
         if row is None:
             return None
         return conn.execute(
@@ -358,7 +406,7 @@ def update_memory(
 
 def delete_memory(memory_id: int) -> bool:
     with connect() as conn:
-        return conn.execute("DELETE FROM memory WHERE id = %s", (memory_id,)).rowcount > 0
+        return conn.execute("DELETE FROM memory WHERE id=%s AND subject_key=%s", (memory_id,user_scope.subject())).rowcount > 0
 
 
 def merge_memories(
@@ -366,7 +414,7 @@ def merge_memories(
 ) -> dict | None:
     with connect() as conn:
         rows = conn.execute(
-            "SELECT id,kind,status,conversation_id FROM memory WHERE id = ANY(%s) FOR UPDATE", (memory_ids,)
+            "SELECT id,kind,status,conversation_id FROM memory WHERE id=ANY(%s) AND subject_key=%s FOR UPDATE", (memory_ids,user_scope.subject())
         ).fetchall()
         if len(rows) != len(memory_ids):
             return None
@@ -394,12 +442,13 @@ def memory_conflicts(memory_id: int, kind: str, conversation_id: UUID | None) ->
         return conn.execute(
             """SELECT old.id,old.content,1-(old.embedding <=> new.embedding) AS similarity
                FROM memory old JOIN memory new ON new.id=%s
-               WHERE old.id<>new.id AND old.status='confirmed' AND old.kind=%s
+               WHERE new.subject_key=%s AND old.subject_key=new.subject_key
+                 AND old.id<>new.id AND old.status='confirmed' AND old.kind=%s
                  AND old.conversation_id IS NOT DISTINCT FROM %s
                  AND (1-(old.embedding <=> new.embedding)>=0.72 OR
                       (new.fact_key<>'' AND old.fact_key=new.fact_key))
                ORDER BY (new.fact_key<>'' AND old.fact_key=new.fact_key) DESC,old.embedding <=> new.embedding LIMIT 3""",
-            (memory_id,kind,conversation_id if kind == "roleplay" else None),
+            (memory_id,user_scope.subject(),kind,conversation_id if kind == "roleplay" else None),
         ).fetchall()
 
 
@@ -408,17 +457,20 @@ def review_memory(memory_id: int, kind: str, status: str, conversation_id: UUID 
     if len(replace_ids) != len(set(replace_ids)) or memory_id in replace_ids:
         raise ValueError("替换条目不能重复或包含自身")
     with connect() as conn:
-        row = conn.execute("SELECT * FROM memory WHERE id=%s FOR UPDATE", (memory_id,)).fetchone()
+        row = conn.execute("SELECT * FROM memory WHERE id=%s AND subject_key=%s FOR UPDATE", (memory_id,user_scope.subject())).fetchone()
         if row is None:
             return None
         if kind == "roleplay" and conversation_id is None:
             raise ValueError("请指定角色扮演记忆所属的会话")
+        if kind=='roleplay' and not conn.execute('SELECT id FROM conversation WHERE id=%s AND subject_key=%s',
+                (conversation_id,user_scope.subject())).fetchone():
+            raise ValueError('记忆会话不属于当前用户')
         scope = conversation_id if kind == "roleplay" else None
         if kind == "hypothetical":
             status = "rejected"
         if replace_ids:
-            old = conn.execute("SELECT id,kind,status,conversation_id FROM memory WHERE id=ANY(%s) FOR UPDATE",
-                               (replace_ids,)).fetchall()
+            old = conn.execute("SELECT id,kind,status,conversation_id FROM memory WHERE id=ANY(%s) AND subject_key=%s FOR UPDATE",
+                               (replace_ids,user_scope.subject())).fetchall()
             if status != "confirmed" or len(old) != len(replace_ids) or any(
                 r["kind"] != kind or r["conversation_id"] != scope or r["status"] != "confirmed" for r in old
             ):

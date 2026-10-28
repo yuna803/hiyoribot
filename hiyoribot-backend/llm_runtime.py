@@ -51,6 +51,12 @@ def local_options(config, *, auxiliary: bool = False) -> dict:
             "top_p": 0.8, "max_tokens": 2048 if auxiliary else 1024}
 
 
+def auxiliary_options(config) -> dict:
+    if is_local(config):
+        return local_options(config,auxiliary=True)
+    return {'temperature':0,'max_tokens':2048,'extra_body':{'thinking':{'type':'disabled'}}}
+
+
 @lru_cache(maxsize=2)
 def _tokenizer(path: str) -> Tokenizer:
     try:
@@ -75,6 +81,11 @@ def fit_messages(messages: list[dict], config, tools: list | None = None,
         return len(tokenizer.encode(text, add_special_tokens=False).ids)
 
     while tokens() > budget:
+        optional_knowledge=[i for i,item in enumerate(fitted) if i>0 and item['role']=='system'
+                            and ('以下是原作汉化对话' in item['content'] or '以下是从原作剧情整理' in item['content'])]
+        if optional_knowledge:
+            del fitted[optional_knowledge[-1]]
+            continue
         users = [index for index, item in enumerate(fitted) if item["role"] == "user"]
         if len(users) > 1:
             del fitted[users[0]:users[1]]  # 删除整个旧问答，不留下孤立工具结果。

@@ -124,7 +124,7 @@ function addRecallTrace(saved = null) {
   box.className = "reasoning-box recall-trace";
   box.hidden = true;
   const title = document.createElement("summary");
-  title.textContent = "剧情召回对照（展开查看）";
+  title.textContent = "原作参考对照（展开查看）";
   const body = document.createElement("div");
   box.append(title,body);
   messages.append(box);
@@ -152,8 +152,34 @@ function addRecallTrace(saved = null) {
     }
     body.append(section);
   }
+  function setProfile(value) {
+    box.hidden = false;
+    const profile = document.createElement("p");
+    profile.textContent = `本轮画像版本 ${value.revision} · 好感度 ${value.affinity}`;
+    body.append(profile);
+  }
+  if (saved?.profile) setProfile(saved.profile);
   for (const record of saved?.rounds || []) append(record);
-  return { append,box };
+  if (saved?.stages?.length) addPipelineStages(saved.stages);
+  return { append, setProfile, box };
+}
+
+function addPipelineStages(saved = []) {
+  const box = document.createElement("details");
+  box.className = "reasoning-box";
+  box.hidden = true;
+  const title = document.createElement("summary");
+  title.textContent = "执行阶段（非内部思考）";
+  box.append(title);
+  messages.append(box);
+  function append(stage) {
+    box.hidden = false;
+    const row = document.createElement("p");
+    row.textContent = `${stage.name} · ${stage.detail || "完成"} · ${stage.elapsed_ms} ms`;
+    box.append(row);
+  }
+  for (const stage of saved) append(stage);
+  return { append };
 }
 
 function addReasoning(text = "") {
@@ -269,8 +295,13 @@ const emptyStoryProgress = () => ({ route: "common", script_name: null, entry_no
 let storyProgress = emptyStoryProgress();
 let storyChapters = [];
 let storyEditingConversation = null;
+let knowledgeMode = "reference";
 
 function showStoryProgress() {
+  if (knowledgeMode === "reference") {
+    $("#story-progress-label").textContent = "原作资料仅作人物与语气参考，日常聊天不受章节限制。";
+    return;
+  }
   $("#story-progress-label").textContent = storyProgress.script_name
     ? `${storyProgress.route === "common" ? "共通线" : "妃爱线"} · ${storyProgress.script_name} #${storyProgress.entry_no} · ${storyProgress.relationship}`
     : "剧情进度未设置，暂不召回原作剧情。";
@@ -325,15 +356,17 @@ $("#story-button").addEventListener("click", async () => {
   try {
     clearError();
     storyEditingConversation = conversationId;
-    const timeline = await api("/story/timeline");
-    if (conversationId !== storyEditingConversation || sending) return;
-    storyChapters = timeline.chapters;
-    $("#story-route").value = storyProgress.route;
-    $("#story-entry").value = storyProgress.entry_no;
+    if (knowledgeMode === "timeline") {
+      const timeline = await api("/story/timeline");
+      if (conversationId !== storyEditingConversation || sending) return;
+      storyChapters = timeline.chapters;
+      $("#story-route").value = storyProgress.route;
+      $("#story-entry").value = storyProgress.entry_no;
+      $("#story-branches").replaceChildren();
+      renderStoryRoute(storyProgress.script_name, storyProgress.completed_scripts);
+    }
     $("#story-relationship").value = storyProgress.relationship;
     $("#story-scene").value = storyProgress.scene;
-    $("#story-branches").replaceChildren();
-    renderStoryRoute(storyProgress.script_name, storyProgress.completed_scripts);
     clearError($("#story-status"));
     $("#story-dialog").showModal();
   } catch (error) { showError(error); }
@@ -345,9 +378,10 @@ $("#story-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
     if (sending || conversationId !== storyEditingConversation) throw new Error("会话已切换或正在回复，请重新打开进度窗口。");
-    const state = { route: $("#story-route").value, script_name: $("#story-chapter").value || null,
+    const timelineState = { route: $("#story-route").value, script_name: $("#story-chapter").value || null,
       entry_no: Number($("#story-entry").value),
-      completed_scripts: [...$("#story-branches").querySelectorAll("input:checked")].map((item) => item.value),
+      completed_scripts: [...$("#story-branches").querySelectorAll("input:checked")].map((item) => item.value) };
+    const state = { ...(knowledgeMode === "timeline" ? timelineState : storyProgress),
       relationship: $("#story-relationship").value.trim(), scene: $("#story-scene").value.trim() };
     if (conversationId) {
       const data = await api(`/conversations/${conversationId}/story-progress`, {
@@ -478,6 +512,7 @@ form.addEventListener("submit", async (event) => {
   send.disabled = true;
   const toolLog = addToolLog();
   const recalled = addRecallTrace();
+  const pipeline = addPipelineStages();
   const thought = addReasoning();
   thought.box.hidden = true;
   const pending = addBubble("assistant", "正在回复…", "pending");
@@ -501,12 +536,15 @@ form.addEventListener("submit", async (event) => {
       if (name === "meta") {
         conversationId = data.conversation_id;
         localStorage.setItem("hiyoriConversationId", conversationId);
-        const recalled = data.recalled_memories || [];
-        recallInfo.textContent = recalled.length
-          ? `本轮召回：${recalled.map((item) => item.content.slice(0, 40)).join("；")}`
+        if (data.profile) recalled.setProfile(data.profile);
+        const recalledMemories = data.recalled_memories || [];
+        recallInfo.textContent = recalledMemories.length
+          ? `本轮召回：${recalledMemories.map((item) => item.content.slice(0, 40)).join("；")}`
           : "本轮未召回长期记忆。";
       } else if (name === "context_used") {
         recalled.append(data);
+      } else if (name === "pipeline_stage") {
+        pipeline.append(data);
       } else if (name === "agent_round" && data.round > 1) {
         pending.textContent = `正在继续思考（第 ${data.round} 轮）…`;
         pending.classList.add("pending");
@@ -581,6 +619,116 @@ $("#stop-generation").addEventListener("click", async () => {
 function closeDialog(id) { $(`#${id}`).close(); }
 for (const button of document.querySelectorAll("[data-close]")) {
   button.addEventListener("click", () => closeDialog(button.dataset.close));
+}
+
+let profilePage = 1;
+let profileTimer = null;
+let profileRevision = null;
+let profileBusy = false;
+const profileDialog = $("#profile-dialog");
+
+function profileLine(parent, text, tag = "p") {
+  const element = document.createElement(tag);
+  element.textContent = text;
+  parent.append(element);
+}
+
+function renderEvidence(parent, evidence) {
+  for (const item of evidence || []) profileLine(parent, `消息 #${item.message_id}：${item.quote}`, "small");
+}
+
+function profileTime(value) {
+  const date = new Date(value);
+  return value && Number.isFinite(date.getTime()) ? date.toLocaleString("zh-CN", { hour12:false }) : "时间未知";
+}
+
+function renderProfile(parent, profile) {
+  profileLine(parent, `身份：${profile?.identity || "暂无"}`);
+  profileLine(parent, `关系感受：${profile?.relationship_feeling || "暂无"}`);
+  const categories = { fact:"事实", preference:"偏好", habit:"习惯", inference:"推测" };
+  const kinds = { real:"现实", roleplay:"角色扮演", inferred:"推断" };
+  for (const item of profile?.observations || []) {
+    const row = document.createElement("div");
+    row.className = "profile-row";
+    profileLine(row, `【${categories[item.category] || item.category} · ${kinds[item.kind] || item.kind}】${item.text}`);
+    renderEvidence(row, item.evidence);
+    parent.append(row);
+  }
+}
+
+function renderChange(parent, change) {
+  profileLine(parent, `好感度 ${change.old_affinity} → ${change.new_affinity}（AI 提议 ${change.delta >= 0 ? "+" : ""}${change.delta}） · ${change.reason}`);
+  renderEvidence(parent, change.evidence);
+}
+
+async function loadProfileHistory() {
+  const data = await api(`/profile/history?page=${profilePage}&page_size=10`);
+  if (!profileDialog.open) return;
+  const list = $("#profile-history");
+  list.replaceChildren();
+  if (!data.items.length) profileLine(list, "暂无更新记录。");
+  for (const item of data.items) {
+    const details = document.createElement("details");
+    details.className = "profile-row";
+    profileLine(details, `版本 ${item.revision} · ${profileTime(item.created_at)}`, "summary");
+    renderChange(details, item);
+    renderProfile(details, item.profile);
+    list.append(details);
+  }
+  $("#profile-page").textContent = `第 ${data.page} 页 · 共 ${data.total} 条`;
+  $("#profile-prev").disabled = data.page <= 1;
+  $("#profile-next").disabled = data.page * data.page_size >= data.total;
+}
+
+async function loadProfile() {
+  if (profileBusy || !profileDialog.open) return;
+  profileBusy = true;
+  try {
+    const data = await api("/profile");
+    if (!profileDialog.open) return;
+    const current = $("#profile-current");
+    current.replaceChildren();
+    const stages = { idle:"空闲", queued:"排队中", running:"更新中", failed:"更新失败" };
+    profileLine(current, `${data.enabled ? "已启用" : "未启用"} · ${stages[data.stage] || data.stage} · 版本 ${data.revision} · 好感度 ${data.affinity}`);
+    profileLine(current, `待处理 ${data.pending_messages} / ${data.threshold} 条消息${data.updated_at ? ` · 更新于 ${profileTime(data.updated_at)}` : ""}`);
+    if (data.error) profileLine(current, `更新错误：${data.error}`);
+    if (data.export_error) profileLine(current, `导出错误：${data.export_error}`);
+    renderProfile(current, data.profile);
+    if (data.last_change) { profileLine(current, "最近一次变化", "h3"); renderChange(current, data.last_change); }
+    $("#profile-refresh").disabled = !data.enabled || ["queued", "running"].includes(data.stage);
+    if (profileRevision !== data.revision) {
+      await loadProfileHistory();
+      profileRevision = data.revision;
+    }
+    clearError($("#profile-status"));
+  } catch (error) { if (profileDialog.open) showError(error, $("#profile-status")); }
+  finally { profileBusy = false; }
+}
+
+$("#profile-button").addEventListener("click", () => {
+  if (profileDialog.open) return;
+  profilePage = 1;
+  profileRevision = null;
+  profileDialog.show();
+  loadProfile();
+  profileTimer = setInterval(loadProfile, 2000);
+});
+profileDialog.addEventListener("close", () => { clearInterval(profileTimer); profileTimer = null; });
+$("#profile-refresh").addEventListener("click", async () => {
+  const button = $("#profile-refresh");
+  button.disabled = true;
+  try {
+    const data = await api("/profile/refresh", { method:"POST" });
+    button.disabled = !data.enabled || ["queued", "running"].includes(data.stage);
+    await loadProfile();
+  } catch (error) { button.disabled = false; showError(error, $("#profile-status")); }
+});
+for (const [selector, delta] of [["#profile-prev", -1], ["#profile-next", 1]]) {
+  $(selector).addEventListener("click", async () => {
+    profilePage += delta;
+    try { await loadProfileHistory(); clearError($("#profile-status")); }
+    catch (error) { profilePage -= delta; showError(error, $("#profile-status")); }
+  });
 }
 
 $("#new-chat").addEventListener("click", newChat);
@@ -844,6 +992,17 @@ $("#merge-memory-form").addEventListener("submit", async (event) => {
 async function initialize() {
   try {
     const modelStatus = await api("/model-status");
+    knowledgeMode = modelStatus.knowledge_mode === "timeline" ? "timeline" : "reference";
+    const timeline = knowledgeMode === "timeline";
+    $("#story-timeline-fields").hidden = !timeline;
+    $("#story-timeline-fields").disabled = !timeline;
+    $("#story-button").textContent = timeline ? "剧情进度与场景" : "场景设置";
+    $("#story-dialog-title").textContent = timeline ? "本会话剧情进度" : "本会话场景设置";
+    $("#story-dialog-hint").textContent = timeline
+      ? "对话者固定为智宏（哥哥）。进度只属于当前会话，不会随聊天自动推进。新对话的设定随第一条消息一起保存。回退进度后，旧聊天仍保留；想从头体验建议开新对话。"
+      : "对话者固定为智宏（哥哥）。关系和场景只属于当前会话；新对话的设定随第一条消息一起保存。";
+    $("#story-save").textContent = timeline ? "保存本会话进度" : "保存本会话场景";
+    showStoryProgress();
     if (!modelStatus.thinking_supported) {
       thinkingEnabled.checked = false;
       thinkingEnabled.closest("label").hidden = true;

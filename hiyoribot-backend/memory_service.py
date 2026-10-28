@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 import storage
 import llm_runtime
+import user_scope
 
 logger = logging.getLogger(__name__)
 EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
@@ -19,7 +20,7 @@ MIN_SIMILARITY = 0.55
 EXTRACTION_PROMPT = """你负责从用户原话提取适合长期记住的事实或偏好。
 只依据用户当前这条消息，不推测，也不要把助手说的话当成用户事实。
 只保留今后聊天可能有用的稳定信息；临时任务、闲聊、密码、密钥、证件号和详细地址不要保存。
-区分 real（现实中的事实/偏好）、roleplay（智宏/哥哥在角色扮演中的设定）、hypothetical（假如、想象、未发生的提议）。
+区分 real（现实中的事实/偏好）、roleplay（当前用户在角色扮演中的设定）、hypothetical（假如、想象、未发生的提议）。
 与妃爱的剧情互动默认属于 roleplay，只有明确说现实生活中的自己时才归为 real；假设不要当作事实。
 最多提取 3 条，每条独立完整，不超过 300 字。重要度为 1 到 5。
 仅返回 JSON 对象，格式为 {"facts":[{"content":"...","importance":3,"kind":"real","fact_key":"主题"}]}。
@@ -76,7 +77,7 @@ def extract_and_store(user_text: str, source_message_id: int, config) -> int:
                 {"role": "user", "content": user_text},
             ], config, output_tokens=2048),
             response_format={"type": "json_object"},
-            **llm_runtime.local_options(config, auxiliary=True),
+            **llm_runtime.auxiliary_options(config),
         )
     content = response.choices[0].message.content if response.choices else None
     facts = ExtractedFacts.model_validate_json(content or '{}').facts
@@ -90,7 +91,8 @@ def extract_and_store(user_text: str, source_message_id: int, config) -> int:
 
 def extract_safely(user_text: str, source_message_id: int, config) -> None:
     try:
-        extract_and_store(user_text, source_message_id, config)
+        with user_scope.activate(getattr(config,'profile_subject_key',user_scope.WEB_OWNER)):
+            extract_and_store(user_text, source_message_id, config)
     except Exception as exc:
         # 后台提取失败不影响已保存的聊天；日志不包含原文和密钥。
         logger.warning("长期记忆提取失败：%s", type(exc).__name__)

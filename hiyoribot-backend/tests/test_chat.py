@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import patch, ANY
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -83,7 +83,9 @@ class ChatApiTest(unittest.TestCase):
         save_turn.assert_called_once_with(self.conversation_id, "你好", "你好！", "",
                                          agent_messages=[{"role": "assistant", "content": "你好！",
                                                           "reasoning_content": ""}],
-                                         recalled_context={"rounds":[{"round":1,"notes":[],"dialogue":[],"summary_used":False,"progress":None}]})
+                                         recalled_context=ANY)
+        self.assertEqual([s['name'] for s in save_turn.call_args.kwargs['recalled_context']['stages']],
+                         ['画像读取','资料检索','上下文准备','工具选择'])
 
     def test_role_knowledge_recall_is_separate_from_user_memory(self) -> None:
         sample = {"kind": "style", "content": "妃爱工作时说话利落", "similarity": 0.75}
@@ -141,7 +143,8 @@ class ChatApiTest(unittest.TestCase):
         save_turn.assert_called_once_with(self.conversation_id, "你好", "你好", "先回应问候。",
                                          agent_messages=[{"role": "assistant", "content": "你好",
                                                           "reasoning_content": "先回应问候。"}],
-                                         recalled_context={"rounds":[{"round":1,"notes":[],"dialogue":[],"summary_used":False,"progress":None}]})
+                                         recalled_context=ANY)
+        self.assertIn('event: pipeline_stage',success.text)
 
     def test_thinking_can_be_disabled(self) -> None:
         fake = SimpleNamespace(choices=[SimpleNamespace(

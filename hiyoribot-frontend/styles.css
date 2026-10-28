@@ -167,6 +167,12 @@ button:disabled { opacity: .6; cursor: wait; }
   box-shadow: 0 20px 70px #20254140;
 }
 .settings-dialog::backdrop { background: #22294388; }
+.profile-dialog { position: fixed; inset: 20px 20px auto auto; margin: 0; max-height: calc(100vh - 40px); }
+.profile-dialog p { overflow-wrap: anywhere; }
+.profile-row { margin: 10px 0; padding: 10px; border: 1px solid #e5e8f0; border-radius: 10px; }
+.profile-row p { margin: 5px 0; }
+.profile-row small, #profile-current small { display: block; color: #69748c; white-space: pre-wrap; overflow-wrap: anywhere; }
+.profile-dialog .dialog-actions { align-items: center; }
 .settings-dialog form { display: flex; flex-direction: column; }
 .dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
 .dialog-heading h2 { margin: 0; font-size: 20px; }

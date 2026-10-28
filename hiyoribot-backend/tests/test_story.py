@@ -122,7 +122,8 @@ class StoryTests(unittest.TestCase):
               patch("storage.role_knowledge_count", return_value=0),
               patch("storage.game_dialogue_counts", return_value={"chunks": 0}),
               patch("memory_service.recall", return_value=[])):
-            result = prepare_chat(ChatRequest(message="你好", story_progress=state))
+            from main import AppConfig
+            result = prepare_chat(ChatRequest(message="你好", story_progress=state),AppConfig(knowledge_mode='timeline'))
             create.assert_called_once_with("你好", state.model_dump())
             self.assertIn("截至台词 #2", result[1][0]["content"])
             with patch("storage.get_conversation", return_value={"id": identifier}):
