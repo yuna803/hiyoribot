@@ -14,7 +14,7 @@ from nonebot.log import logger
 config = get_driver().config
 backend_url = str(getattr(config, "hiyori_backend_url", "http://127.0.0.1:8000")).rstrip("/")
 backend_token = str(getattr(config, "hiyori_backend_token", ""))
-env_file = Path(os.environ.get("HIYORI_QQ_ENV_FILE", r"E:\unser\q\hiyoribot_runtime\qq\.env"))
+env_file = Path(os.environ.get("HIYORI_QQ_ENV_FILE", str(Path.home()/".local/share/hiyoribot/flash/qq.env")))
 state_path = Path(os.environ.get("HIYORI_QQ_STATE_DB", str(env_file.parent / "hiyori-qq.sqlite3")))
 locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
 matcher = on_message(priority=10, block=False)

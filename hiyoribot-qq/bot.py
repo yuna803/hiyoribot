@@ -1,11 +1,12 @@
 import os
+from pathlib import Path
 
 import nonebot
 from nonebot.adapters.onebot.v11 import Adapter
 
 
 # 配置文件和去重数据库放在私有目录，路径可由环境变量覆盖。
-env_file = os.environ.get("HIYORI_QQ_ENV_FILE", r"E:\unser\q\hiyoribot_runtime\qq\.env")
+env_file = os.environ.get("HIYORI_QQ_ENV_FILE", str(Path.home()/".local/share/hiyoribot/flash/qq.env"))
 nonebot.init(_env_file=env_file, host="127.0.0.1", port=8086, log_level="WARNING")
 if not str(getattr(nonebot.get_driver().config, "hiyori_backend_token", "")).strip():
     raise RuntimeError("QQ网关私有配置缺少HIYORI_BACKEND_TOKEN")

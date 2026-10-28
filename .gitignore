@@ -32,3 +32,10 @@ profile.md
 *.safetensors
 *.bin
 *.vhdx
+
+# flash运行状态
+*.sqlite
+*.sqlite3-*
+*.sqlite-*
+*.process.lock
+qq.env

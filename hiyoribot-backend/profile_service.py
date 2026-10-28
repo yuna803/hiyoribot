@@ -120,7 +120,7 @@ def eligible_ids(rows: list[dict], state: dict) -> set[int]:
     # ponytail: 按本用户批次读取旧原话去重；数据量大后再建规范化指纹索引。
     with storage.connect() as conn:
         previous=conn.execute('''SELECT u.content FROM completed_turn t JOIN message u ON u.id=t.user_message_id
-            WHERE t.id>%s AND t.id<=%s AND t.subject_key=%s''',
+            WHERE t.id>? AND t.id<=? AND t.subject_key=?''',
             (state['baseline_turn_id'],state['through_turn_id'],user_scope.subject())).fetchall()
     seen={_normalized(row['content']) for row in previous}
     eligible=set()
@@ -165,7 +165,7 @@ def validate(result: Analysis, users: dict[int,str], old_profile: dict, eligible
             item['text']=observation.evidence[0].quote
             if re.search(r'假如|假设|如果|也许|可能',quoted):
                 item['kind']='inferred'
-            elif item['kind']=='real' and not re.search(r'现实|我本人|真实的我|生活中|工作中',quoted):
+            elif re.search(r'扮演|设定中|剧情里|角色设定',quoted):
                 item['kind']='roleplay'
         cleaned.append(item)
     value=result.model_dump()
@@ -308,30 +308,24 @@ def _work(config) -> None:
 def _work_subject(config) -> None:
     subject=user_scope.subject()
     try:
-        # 会话级锁跨模型调用持有，防止多个进程同时维护同一画像。
-        with storage.connect() as guard:
-            acquired=guard.execute('SELECT pg_try_advisory_lock(hashtextextended(%s,721042)) AS acquired',
-                                   (subject,)).fetchone()['acquired']
-            guard.commit()
+        # 同一用户的直接互动和旁听更新共用锁，模型调用期间不占用数据库连接。
+        with storage.subject_lock('profile:'+subject,blocking=True) as acquired:
             if not acquired:
                 return
-            try:
-                store.status('running')
+            store.status('running')
+            export_safely(config)
+            while True:
+                state=store.get()
+                count=threshold(state,config)
+                rows=store.source(state['through_turn_id'],count)
+                if len(rows)<count:
+                    store.status('idle')
+                    break
+                result=analyze(state,rows,config)
+                if not store.commit(state,rows,result):
+                    continue
                 export_safely(config)
-                while True:
-                    state=store.get()
-                    count=threshold(state,config)
-                    rows=store.source(state['through_turn_id'],count)
-                    if len(rows)<count:
-                        store.status('idle')
-                        break
-                    result=analyze(state,rows,config)
-                    if not store.commit(state,rows,result):
-                        continue
-                    export_safely(config)
-                export_safely(config)
-            finally:
-                guard.execute('SELECT pg_advisory_unlock(hashtextextended(%s,721042))',(subject,))
+            export_safely(config)
     except Exception as error:
         logging.getLogger(__name__).warning('画像更新失败：%s',type(error).__name__)
         try:

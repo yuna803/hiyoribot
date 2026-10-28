@@ -1,4 +1,4 @@
-"""有限轮次的模型→工具→模型循环，两种聊天接口共用。"""
+"""有限轮次的模型→工具→模型循环，QQ直接互动和主动插话共用。"""
 
 import json
 from time import monotonic
@@ -22,7 +22,7 @@ def _model_round(client, model: str, messages: list[dict], options: dict,
         try:
             messages = llm_runtime.fit_messages(messages, config, agent_tools.TOOLS if tool_choice else None)
         except (OSError, ValueError) as exc:
-            raise AgentError("本地模型上下文或分词器不可用，请检查设定与模型文件") from exc
+            raise AgentError("聊天上下文超出预算，请等待摘要更新或调整输入预算") from exc
     arguments = {"model": model, "messages": list(messages), **options}
     if job:
         job.check()
@@ -33,7 +33,7 @@ def _model_round(client, model: str, messages: list[dict], options: dict,
         used = {"notes": [row for row in recalled_context.get("notes", []) if f"[{row['source']}]" in system_text],
                 "dialogue": [row for row in recalled_context.get("dialogue", [])
                              if f"[{row['script_name']} #{row['first_entry']}-{row['last_entry']}]" in system_text],
-                "summary_used": "本会话摘要：" in system_text,
+                "summary_used": bool(recalled_context.get("summary_revision",0)),
                 "progress": recalled_context.get("progress")}
         yield "context_used", used
     if tool_choice is not None:
@@ -196,7 +196,7 @@ def run(client, model: str, messages: list[dict], conversation_id: UUID,
                 result = agent_tools.execute(name,raw,conversation_id,character_name,**progress_snapshot,**mode)
                 cache[cache_key] = result
             calls_used += 1
-            stage={'name':'联网搜索' if name=='search_web' else '知识库检索' if name.startswith('search_') else '工具执行',
+            stage={'name':'联网搜索' if name=='search_web' else '文字资料查询' if name.startswith('search_') else '工具执行',
                    'status':'completed','elapsed_ms':round((monotonic()-started)*1000),
                    'detail':f"{name}：{'失败' if 'error' in result else '完成'}{'（本轮缓存）' if cached else ''}"}
             stages.append(stage)

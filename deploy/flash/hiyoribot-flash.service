@@ -1,0 +1,28 @@
+[Unit]
+Description=HiyoriBot flash SQLite QQ backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bot
+Group=bot
+WorkingDirectory=/opt/hiyoribot-flash/current/hiyoribot-backend
+Environment=HIYORI_CONFIG=/etc/hiyoribot-flash/config.yaml PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 HOME=/var/lib/hiyoribot-flash
+ExecStart=/opt/hiyoribot-flash/venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000 --no-access-log
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+MemoryHigh=160M
+MemoryMax=256M
+CPUQuota=100%
+TasksMax=64
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/hiyoribot-flash
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

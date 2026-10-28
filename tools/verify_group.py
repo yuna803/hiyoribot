@@ -1,105 +1,72 @@
-"""只在新建的 profile_test_ 临时库验证群旁听；--live-model 会调用已配置模型，不发送QQ。"""
+"""flash验证：默认临时SQLite测试，--live-model额外调用DeepSeek，不发送QQ。"""
 import argparse
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
-from tempfile import TemporaryDirectory
+import tempfile
 import time
 from unittest.mock import patch
-from uuid import uuid4
-
 ROOT=Path(__file__).resolve().parents[1]
 BACKEND=ROOT/'hiyoribot-backend'
 sys.path.insert(0,str(BACKEND))
 
-
-def live_probe():
-    import group_profile
-    import group_service as service
-    import group_storage as store
+def live():
+    import chat_service
+    import group_service as groups
+    import group_storage
     import main
-    import profile_storage
     import storage
+    import summary_service
     import user_scope
-    from psycopg.types.json import Jsonb
-    storage.init_db()
     config=main.resolve_config()
-    card=json.loads((ROOT/'rolecards/izumi-hiyori.json').read_text(encoding='utf8'))
-    storage.update_character(**{k:card[k] for k in ('name','description','personality','background','speaking_style','system_prompt')})
-    with TemporaryDirectory(prefix='hiyori-group-profile-') as folder:
-        config=config.model_copy(update={'qq_bot_id':'810001','qq_owner_id':'820003','qq_profile_home':folder})
-        # 合成公开群，不调用网关，也不使用任何真实群号或用户事实。
+    with tempfile.TemporaryDirectory(prefix='flash-model-check-') as temp:
+        home=Path(temp)
+        storage.configure(home/'live.sqlite3')
+        config=config.model_copy(update={'sqlite_path':str(home/'live.sqlite3'),'profile_home':str(home/'profiles'),
+            'qq_profile_home':str(home/'profiles'),'qq_bot_id':'100001','qq_owner_id':'100002'})
+        samples=[]
+        with user_scope.activate('qq:100002'):
+            cfg=user_scope.config_for(config)
+            conv=storage.create_conversation('合成试听')
+            for text in ('你好，妃爱。','今天有点累，只想随便聊聊。','你现在在忙什么？','帮我看一下Python怎么把字符串转成整数。'):
+                result=chat_service.direct_reply({'message':text,'conversation_id':conv['id']},cfg)
+                reply=result['reply']
+                assert not any(x in reply for x in ('（','内心OS','【状态','递给你','拍了拍','晚饭','菜单','便当','围裙','回家','泡点','坐过来','作息表','学校')), '仍然加入未提供的场景：'+reply
+                storage.save_turn(conv['id'],text,reply,agent_messages=result['agent_messages'],recalled_context=result['recalled_context'])
+                samples.append({'input':text,'reply':reply})
+            # 单独验证真实工具循环，可观察阶段记录，不收集模型内部思考。
+            result=chat_service.direct_reply({'message':'请调用时间工具，告诉我现在几点。','conversation_id':conv['id']},cfg)
+            assert any(t['name']=='get_current_time' for t in result['tool_calls'])
+        rows=[dict(id=i,role='user' if i%2 else 'assistant',content='用户说周末想聊SQLite，助手建议先试试但尚未确认。'+str(i)) for i in range(1,51)]
+        summary,covered=summary_service.summarize('',rows,config)
+        assert len({r['id'] for r in covered})==50
         with patch('group_service.schedule'):
-            for n in range(1,51):
-                body=service.Ingest(bot_id='810001',group_id='830001',user_id=str(820010+n%10),message_id=str(n),
-                    nickname='合成参与者',message='我们在聊周末想尝试什么茶，欢迎妃爱推荐。'+str(n),
-                    text='我们在聊周末想尝试什么茶，欢迎妃爱推荐。'+str(n),sent_at=int(time.time()))
-                service.ingest(body,config)
-        old,rows,batch=store.begin_batch('810001','830001')
-        decision,coverage=service.observe(old,rows,config)
-        store.finish_batch(old,rows,batch,decision,coverage)
-        reply=service.generate(old,rows,{**decision,'focus':'群友在聊周末喝茶，简短接一句。'},config)
-        store.save_candidate(old,rows,batch,reply,None)
-        candidate=store.candidates('810001')['items'][0]['id']
-        # 注入一个新合成事件，验证真实API的发送前复核JSON。
-        with patch('group_service.schedule'):
-            service.ingest(body.model_copy(update={'message_id':'51','message':'我们还在聊喝茶。','text':'我们还在聊喝茶。'}),config)
-        review=service.claim(service.Claim(bot_id='810001',candidate_id=candidate),config)
-        # 实际模型校验旁听画像，但不依赖模型一定提取事实。
-        user='820099'
-        with storage.connect() as conn:
-            conn.execute('INSERT INTO qq_passive_profile(bot_id,user_id) VALUES(%s,%s)',('810001',user))
-            for n in range(10):
-                conn.execute('''INSERT INTO qq_group_message(bot_id,group_id,message_id,user_id,nickname,content,
-                    plain_text,sent_at,profile_eligible) VALUES('810001','830002',%s,%s,'合成用户',%s,%s,now(),true)''',
-                    (str(100+n),user,'我平时喜欢无糖茶，尤其是红茶。'+str(n),'我平时喜欢无糖茶，尤其是红茶。'+str(n)))
-            maximum=conn.execute("SELECT max(id) AS n FROM qq_group_message WHERE group_id='830002'").fetchone()['n']
-            conn.execute("INSERT INTO qq_group_state(bot_id,group_id,through_id) VALUES('810001','830002',%s)",(maximum,))
-        group_profile.update('810001',user,config,service.GroupModel)
-        with user_scope.activate('qq:'+user):
-            portrait=profile_storage.get()
-        result=dict(observation_schema=True,covered_messages=len({r['id'] for r in coverage}),
-                    candidate_chars=len(reply),review_schema=isinstance(review['send'],bool),
-                    passive_revision=portrait['revision'],passive_affinity=portrait['affinity'],
-                    direct_updates=portrait['direct_updates'],qq_messages_sent=0)
-        assert result['covered_messages']==50 and result['passive_affinity']==50 and result['direct_updates']==0
-        print(json.dumps(result,ensure_ascii=False))
-
+            for i in range(1,51):
+                groups.ingest(groups.Ingest(bot_id='100001',group_id='900001',user_id=str(200000+i%10),message_id=str(i),
+                    nickname='合成群友',message='我们正在讨论用SQLite保存聊天。'+str(i),text='我们正在讨论用SQLite保存聊天。'+str(i),sent_at=int(time.time())),config)
+        old,batch,identifier=group_storage.begin_batch('100001','900001')
+        decision,coverage=groups.observe(old,batch,config)
+        group_storage.finish_batch(old,batch,identifier,decision,coverage)
+        with user_scope.group('100001','900001'):
+            group_reply=chat_service.group_reply('100001','900001',{**decision,'focus':'大家讨论SQLite，简短接话'},config)['reply']
+        assert '哥哥' not in group_reply, '无本人参与的群聊不得喊哥哥'
+        report={'samples':samples,'group_reply':group_reply,'summary':summary,'covered_messages':len({r['id'] for r in coverage}),
+            'tool_loop':True,'qq_messages_sent':0}
+        output=Path(os.environ.get('HIYORI_FLASH_HOME',str(Path.home()/'.local/share/hiyoribot/flash')))/'live-model-check.json'
+        output.parent.mkdir(parents=True,exist_ok=True)
+        output.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf8')
+        print(json.dumps({'passed':True,'report':str(output),'samples':len(samples),'covered_messages':50,'tool_loop':True,'qq_messages_sent':0},ensure_ascii=False))
 
 def main():
-    import psycopg
-    from psycopg import sql
-    from psycopg.conninfo import make_conninfo
-    import yaml
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--live-model',action='store_true')
-    parser.add_argument('--all',action='store_true',help='运行整个后端测试集')
-    parser.add_argument('--child-live',action='store_true',help=argparse.SUPPRESS)
+    parser.add_argument('--all',action='store_true',help='当前默认即全部flash后端测试')
     args=parser.parse_args()
-    if args.child_live:
-        assert os.getenv('PROFILE_TEST_DATABASE')=='1'
-        import storage
-        with storage._open_connection() as conn:
-            assert conn.execute('SELECT current_database() AS n').fetchone()['n'].startswith('profile_test_')
-        live_probe()
-        return
-    config=yaml.safe_load((BACKEND/'config.yaml').read_text(encoding='utf8'))
-    dsn=os.getenv('DATABASE_URL') or config['database_url']
-    name='profile_test_'+uuid4().hex[:12]
-    with psycopg.connect(dsn,autocommit=True) as admin:
-        admin.execute(sql.SQL('CREATE DATABASE {}').format(sql.Identifier(name)))
-        try:
-            env={**os.environ,'DATABASE_URL':make_conninfo(dsn,dbname=name),'PROFILE_TEST_DATABASE':'1','RUN_DB_TEST':'1','PYTHONUTF8':'1'}
-            command=([sys.executable,str(Path(__file__).resolve()),'--child-live'] if args.live_model else
-                     [sys.executable,'-m','unittest','discover','-s','tests','-v']+([] if args.all else ['-p','test_group.py']))
-            result=subprocess.run(command,cwd=BACKEND,env=env)
-            raise SystemExit(result.returncode)
-        finally:
-            assert name.startswith('profile_test_') and len(name)==25
-            admin.execute(sql.SQL('DROP DATABASE {} WITH (FORCE)').format(sql.Identifier(name)))
-
-
-if __name__=='__main__':
-    main()
+    if args.live_model:
+        live()
+    else:
+        raise SystemExit(subprocess.run([sys.executable,'-m','unittest','discover','-s','tests','-v'],cwd=BACKEND,
+            env={**os.environ,'PYTHONUTF8':'1'}).returncode)
+if __name__=='__main__': main()

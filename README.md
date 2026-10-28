@@ -1,306 +1,77 @@
-# HiyoriBot（V0.9）
+# HiyoriBot · flash
 
-这是一个在本机运行的 Python 聊天项目，支持网页和按QQ用户隔离的聊天。后端在 `hiyoribot-backend/`，网页在 `hiyoribot-frontend/`，QQ网关在 `hiyoribot-qq/`，每次修改的简短记录见 [WORKLOG.md](WORKLOG.md)。
+保留用户原始TXT人设的纯QQ聊天Agent：DeepSeek API、NoneBot／NapCat、Python内置SQLite。没有网页聊天和TTS运行入口，不安装PostgreSQL、向量索引或embedding模型。
 
-当前包含角色聊天、长短期记忆、模型主动工具查询和按需日语配音。
-
-## 当前定位：有妃爱味道的日常聊天
-
-核心人设使用用户提供的 `prompt.txt`，全文完整保存于角色卡及数据库的System Prompt。原稿约7,266 tokens。当前按用户后续决定使用 `provider: deepseek`、`deepseek-flash`；聊天、画像、摘要和日语翻译走现有API，语音合成与向量检索仍在本机。这些模型请求会产生API费用，画像仍按20/50条批次更新，不是每条消息更新。
-
-切换前已验证本机 `hiyori-base-16k`（num_ctx=16384）可推理；当前保留作手动切回本地的备用，原8K模型也保留，驻留本地聊天模型已卸载。可用 [Ollama派生模型接口](https://docs.ollama.com/api/create) 建立相同配置，无需重训或重复下载权重。16K设置仅用于本地备用模型，不代表DeepSeek的上下文限制；本地模型的num_ctx与YAML预算需一致。
-
-根据用户选择，日常聊天运行时屏蔽原稿中的「输出结构、状态栏规范、内心OS规范、记忆锚点规范、剧情推进指令」五个固定游戏输出章节，保留其余人设与互动风格。仅在末尾加覆盖说明的本地首测仍输出状态栏，因此采用明确的章节处理；数据库原文不删除。运行约定要求自然接话，旁白/角色OS按需简短放在括号里，好感度等状态只在面板查看，模型不自行修改程序分数。不要求每条消息都提便当、管理或风险评估。
-
-默认 `knowledge_mode: reference`：共通线与妃爱线按向量相似度召回少量原作片段，未设置章节也可使用。片段辅助语气、人物与背景，不能自动成为当前事件或共同经历，不能代替哥哥当前话题。超预算先删除可选原作参考，再按原有规则裁剪聊天。网页入口改为「场景设置」，路线与章节在日常参考模式下隐藏，保存场景保留旧摘要。
-
-如需恢复先前严格限制未来章节的体验，可设 `knowledge_mode: timeline`；原作顺序、旧会话进度和数据仍保留。QQ通过独立NoneBot网关接入同一个后端，提供方只随配置显式切换，不自动回退。
-
-## QQ聊天
-
-NapCat负责QQ连接，NoneBot2负责消息触发，现有后端继续处理人设、画像、短期上下文、摘要、长期记忆、原作参考和工具循环。当前QQ接入是文字聊天；网页按需TTS入口保留，没有自动向群里发送配音。
-
-- 私聊直接回复；群里只有真实`@机器人`才触发，机器人自己的消息不触发。当前对所有私聊和所在群的真实@生效；如需限定群，应在网关增加明确的允许列表。
-- `qq_owner_id`绑定本人的QQ号，只有这个QQ身份沿用哥哥设定。其他用户不会因为自称哥哥就改绑。
-- 画像/好感度按`qq:<QQ号>`独立维护，同一个人跨会话累计；聊天上下文按机器人、用户、私聊/群分别保存。网页仍使用`web:owner`，不会混入QQ记录。
-- 各人的画像在`qq_profile_home/<QQ号>/profile.json`、`profile.md`及`history/`，默认根目录`E:/unser/q/hiyoribot_profiles/qq`。数据库保存权威状态；模型不能直接修改身份和分值。首次20条、此后每50条成功保存的完整问答更新一次，初始50分、范围-100～100。
-- 群聊注入的画像证据和记忆限制为当前群的公开来源；私聊及其他群的信息不会自动带入群回复。好感度仍是该用户的统一互动状态，不默认公开报分。
-- 网关和后端两侧都持久化去重；重复上报、超时或发送失败不自动重新调用模型。进程中断后原消息不自动重试，需要用户发一条新消息。完整问答以后端保存成功为计数边界，QQ发送失败不会回滚已保存的问答。
-
-配置见 [QQ网关说明](hiyoribot-qq/README.md) 和后端`config.example.yaml`的`qq_*`字段。后端入口`POST /integrations/qq/chat`需独立Bearer密钥，不能通过网页传入任意用户身份。后端和网关只绑定本机，真实配置及数据留仓库外。
-
-NapCat已启动登录后，双击`启动QQ智能体.cmd`检查数据库、启动后端和网关。`停止QQ智能体.cmd`只关闭QQ网关，保留网页、数据库及NapCat；日志和去重库在`E:/unser/q/hiyoribot_runtime/qq`。
-
-## 用户画像与好感度
-
-网页的「用户画像」可查看网页智宏（哥哥）的画像、证据、好感度和历史，身份固定为`web:owner`。QQ用户另行按QQ号维护，网页不会直接展示他们的私聊、画像和记忆。画像独立于长期记忆的自动提取开关。
-
-```yaml
-profile_enabled: true
-profile_home: 'E:/unser/q/hiyoribot_profiles/web_owner'
-profile_initial_messages: 20
-profile_batch_messages: 50
-```
-
-首次启用建立50分画像，从当时成功保存的问答之后起算，旧聊天和演示不回填。你与妃爱的消息分别计数：首次10轮完整问答更新，此后每25轮更新。跨网页会话累计，工具协议消息、取消和失败不计数。门槛必须是偶数；服务启动时会恢复文件同步和积压任务，修改配置可通过「检查更新 / 重试」生效。
-
-更新输入是上一版画像、固定旧好感度和这一批新增问答。使用当前提供方：本地模式用 [Ollama结构化输出](https://docs.ollama.com/capabilities/structured-outputs)，DeepSeek用 [JSON Output](https://api-docs.deepseek.com/guides/json_mode/) 并在程序中校验字段和证据；画像、摘要与事实提取关闭额外模型思考并限制输出。输入过长则逐块归纳，最后整批只提交一次。分块候选分数不会相加。每批由模型提议-5～+5的增量，程序累计到-100～100，中性为0；重复原话、直接要求改分不能反复计分。这里只是角色互动状态，不是对现实中人的价值评分。
-
-现实事实、角色扮演和推测分开。观察必须有用户消息编号与原话，不能把助手编造内容当事实；事实文字使用来源原句，保留否定和条件。没有明确现实标记时保守归为角色扮演，习惯与推测标为inferred；过滤临时场景与明显敏感信息。机器归纳仍可能出错，后续可以在聊天中明确纠正，下一批更新时核对。画像不会自动修改已确认长期记忆或会话剧情设定。
-
-好感度通过亲疏、措辞和主动程度影响后续回复，不默认报分，不覆盖角色身份、关系与当前场景，也不自动进入恋爱关系。每轮固定读取一个画像版本，后台生成的新画像从后续问答生效。页面的「执行阶段（非内部思考）」记录实际准备和工具执行结果；它不等同于模型内部思考链。
-
-画像目录自动生成 `profile.json`、`profile.md`、`history/revision_*.json`。PostgreSQL的 `completed_turn` 记录新完整问答，`user_profile` 和 `user_profile_history` 保存权威画像、游标和变化历史；这些表包含在现有数据库备份中。文件是可读副本，直接编辑不会改变程序状态；恢复数据库或文件同步失败后会重新导出。保持备份和目录仅供本机使用，不提交Git。
-
-本地模式下画像任务与聊天、配音共用显卡锁，新请求可能等待显卡；DeepSeek模式的文本任务使用API，TTS合成继续在本机排队。失败保留旧画像、分值和游标；下一次成功问答、服务重启或手动重试会继续。停用画像会暂停更新，重新启用时从原游标续算尚未处理的问答，失败不自动切换提供方。
-
-提示词在 [profile_prompt.md](hiyoribot-backend/profile_prompt.md)，可调整描述和判断参考；JSON字段、证据约束和分值上限由代码校验。接口为 `GET /profile`、`GET /profile/history?page=1&page_size=10` 和 `POST /profile/refresh`。不足条数只显示进度，不调用模型；手动检查也可修复文件同步。
-
-画像集成测试须在专用临时库执行，设置 `PROFILE_TEST_DATABASE=1`，且库名以 `profile_test_` 开头。普通回归可在后端目录执行 `python -m unittest discover -s tests -v`；真实数据库用例还需 `RUN_DB_TEST=1`。不要把合成测试记录写入日常聊天库。
-
-## 日常使用
-
-配置和本机环境就绪后，双击根目录的 `启动HiyoriBot.cmd`。它依次检查 PostgreSQL、Ollama（本地模式）和网页，打开 `http://127.0.0.1:8000/`。`停止HiyoriBot.cmd` 只关闭本项目网页服务，数据库和共享模型服务继续运行。日志在仓库外 `E:\unser\q\hiyoribot_runtime`；路径可通过 `HIYORI_LOCAL_HOME` 调整。这些脚本使用已有环境，不安装数据库或模型。
-
-| 入口 | 用途 |
-| --- | --- |
-| 场景设置 | 可选地补充关系与当前情境；日常聊天不必选择章节 |
-| 长期记忆 | 核对待确认候选的用户原话，修正分类，选择替换旧记忆 |
-| 会话摘要 | 查看旧问答摘要，手动更新或修正情境、安排和待续话题 |
-| 回复中的剧情召回对照 | 查看每轮实际送给模型的原作片段、脚本序号、相似度与进度 |
-| 停止生成 | 关闭上游流；停止后本轮不保存完整问答，输入保留供重发 |
-| 妃爱配音 | 显示排队、等待显卡、翻译、释放显存、合成阶段；失败可重试 |
-
-自动提取先保存为**待确认**，不会立即召回。现实事实可跨会话使用；角色扮演设定只用于所属会话；假设不作为事实召回。相关旧记忆只是纠错建议，由用户勾选后才替换，旧条目标为已替换并保留来源。手动新增是用户明确确认的内容；假设仍只归档。机器分类和摘要可能出错，窗口保留原话和修正入口。
-
-自动摘要只压缩最近 24 条以外的完整问答，积累至少 12 条旧消息后更新。摘要不删除历史，不作为长期事实；用户设置的场景优先，安排与意愿须能对上用户原句，助手提出的安排单列为未核实。改变剧情进度会清空旧摘要，重复保存同一进度不会清空；并发生成不会覆盖较新的人工修正。`auto_summarize: false` 可关闭自动摘要。DeepSeek 模式下摘要会增加模型调用，本地模式使用基础辅助模型。
-
-剧情对照记录上下文裁剪后实际保留的参考，每轮记录随回复保存，刷新仍可查看。工具查到的资料见工具记录。传入资料不代表模型一定遵循；没有检索证据的描述仍可能是模型编造。停止发生在完整回复已经进入数据库保存阶段时，页面会等待保存完成，不把已完成记录谎称为撤销。
-
-### 数据库备份与恢复
-
-双击 `备份数据库.cmd`，保存角色卡、会话、记忆、原作索引和剧情进度。默认位置为仓库外 `E:\unser\q\hiyoribot_backups`，每次生成 `.dump` 和同名 `.json`（大小与 SHA256）。两份文件一起保管；这不包含模型权重、原始游戏或配音缓存。
-
-把 `.dump` 拖到 `恢复数据库.cmd`，按提示输入目标库名称。程序先校验归档、关闭网页，再备份当前数据库，最后在一个事务内恢复；失败则回滚，随后尝试恢复网页服务。恢复会替换归档中包含的对象，使用前确认目标。备份必须放仓库外，凭据只通过子进程环境传递。命令行与临时库验证方法见 [工具说明](tools/README.md)。
-
-## 本机小模型与角色微调
-
-本机模式通过 Ollama 运行 Qwen3-4B-Instruct-2507 的 Q4_K_M 量化模型。它提供正式回复和工具调用，不输出思考链。网页仍使用原来的角色卡、短期上下文、长期记忆和原作检索；微调只学习妃爱的接话和说话方式，剧情事实仍由检索库提供。
-
-本机 Ollama、模型、训练环境和结果放在仓库外的 `E:\unser\q\hiyori_llm`。启动模型服务：
-
-```powershell
-.\tools\start_local_llm.ps1
-```
-
-在被 Git 忽略的 `hiyoribot-backend/config.yaml` 设置以下字段，然后按后面的启动步骤运行网页：
-
-```yaml
-provider: local
-local_model: hiyori-base
-local_auxiliary_model: hiyori-base
-local_base_url: http://127.0.0.1:11434/v1
-local_tokenizer_path: 'E:/unser/q/hiyori_llm/models/tokenizer.json'
-local_context_tokens: 8192
-```
-
-`local_model` 用于聊天，`local_auxiliary_model` 用于记忆提取与忠实日语翻译，后者保留未微调的基础模型。`provider: local` 不读取 `DEEPSEEK_*` 环境变量，也不会在本地失败时回退收费 API。切回 `provider: deepseek` 才会使用原有云端配置。`GET /model-status` 只返回提供方、模型名称和是否支持思考，不暴露密钥或连接串。
-
-本地上下文用模型的 `tokenizer.json` 计算预算，预留输出和模板开销；超预算先删除完整旧问答，再删参考资料，不能容纳角色设定与当前问答时明确报错。每轮工具调用重新检查预算。本地聊天、记忆提取和配音串行使用显卡；配音翻译完成后必须成功卸载本项目的语言模型，才启动 GPT-SoVITS。缓存命中不重新合成。原始台词、训练数据和权重不提交 Git。
-
-### 原作对话数据与训练
-
-只读导出已入库的共通线和妃爱线中文台词，不使用用户私聊或机器人生成回复：
-
-```powershell
-.\hiyoribot-backend\venv\Scripts\python.exe tools\llm_pilot_dataset.py --output 'E:\unser\q\hiyori_llm\pilot_v1'
-```
-
-数据按原作说话人构造 user（智宏）/assistant（妃爱），最多保留三轮完整上下文；旁白和其他角色插话切断片段，相邻同说话人合并。按完整脚本分约 80/10/10 三组，再去掉重复目标回复；最终样本比例会因各脚本长度不同而变化。报告记录剔除原因和各组来源，公开代码不包含游戏全文。
-
-训练使用独立 `Hiyori-Train` Ubuntu WSL2，虚拟环境 `/opt/hiyori-env`，关键依赖见 [训练依赖](tools/llm-training-requirements.txt)。基础训练权重来自 `unsloth/Qwen3-4B-Instruct-2507-unsloth-bnb-4bit`，推理 GGUF 来自 `unsloth/Qwen3-4B-Instruct-2507-GGUF`；下载时固定 revision，并保留本机清单与完整依赖锁定文件。模型加载使用本机文件。训练前暂时停止网页服务，卸载 Ollama 模型，避免与训练竞争显存。
-
-```powershell
-wsl -d Hiyori-Train -u root -- /opt/hiyori-env/bin/python /mnt/e/unser/Desktop/hiyori_bot/tools/llm_pilot_train.py --model /mnt/e/unser/q/hiyori_llm/training_base --dataset /mnt/e/unser/q/hiyori_llm/pilot_v1 --stage auto
-```
-
-`auto` 先运行 1,024 tokens 的 20 步显存检查；CUDA OOM 才重试 512 tokens，两次 OOM 就停止。检查通过后重新加载模型，按 rank 8、批量 1、梯度累积 8、学习率 `1e-4` 训练两轮，只计算 assistant 回复的损失。长样本跳过并记录，不截断目标台词。保存每轮 adapter 和训练配置；训练中其他错误或 OOM 会停止，不自动加轮数。
-
-### 对照与使用门槛
-
-用 `tools/llm_pilot_evaluate.py --model ... --dataset ... --variant baseline|early|final` 在同一量化与采样条件下比较三组权重，包含新日常话题、连续聊天、未训练过的脚本对话、记忆提取和翻译。结果与 HTML 对照页只保存在本机。工具协议测试使用固定日期结果，再单独通过网页接口检查真实工具调用；对照输出限制为 256 tokens，并标记触及上限的回复。
-
-比较接话自然度、角色身份、复读、原作事实与工具能力；低训练损失不等于角色效果更好。本机默认先使用 `hiyori-base`，经用户对照体验后才切换候选角色权重。机器翻译和原作事实仍需核对，尤其注意漏词、称呼和人称。
-
-本轮两组 adapter 在新话题上出现工具标签复读，未通过使用门槛，保留在本机供检查，不导入 Ollama 作为聊天模型。当前 Unsloth 的合并流程要求原始 16 位基础权重；本轮直接合并 NF4 基础权重的尝试被拒绝，没有写出候选 GGUF。先排查回复标签、语料与训练配置，通过对照后再安排下一次训练与导出；本轮不增加训练轮数。
-
-## 可选的严格剧情顺序模式（knowledge_mode: timeline）
-
-聊天页新增「剧情进度与场景」。每个会话单独保存路线、当前脚本、截至台词序号、用户确认的已发生分支、关系和场景。对话者仍固定为智宏（哥哥），进度不由模型自动推进。新对话的草稿随第一条消息入库；已有会话保存后立即生效，刷新仍保留。旧会话默认未设置进度，不召回原作片段或剧情摘要；先在窗口选择章节。
-
-跳转顺序从原版脚本控制区读取，包含 `excall`、`select` 的实际目标与条件，以及未收录场景之间的桥接。当前导入 87 个共通线/妃爱线章节、98 条跳转；不靠文件名构造线性时间线。必经前置按跳转图确定，中途调用只放行调用位置之前的台词。可选前置需要用户勾选；互斥分支、未来章节和超出本章范围的序号会被拒绝。
-
-普通召回和模型的 `search_character_knowledge` 工具共用边界。先限制章节和台词范围，再做相似度排序；命中后补同脚本前后各最多三条台词，并再次截住当前进度。旧角色摘要的来源是文件行号，不将它冒充台词序号，只在整章确定完成后召回。
-
-有四个脚本包含未完整核对的内部标签跳转：`共通-23.ast`、`共通-25a.ast`、`共通-25c.ast`、`共通-29.ast`。从不确定位置开始的台词和相关摘要保守排除，窗口显示提示；`妃愛-af.ast` 是未与主线连接的独立场景，前置只能由用户明确确认。当前确认的是脚本执行结构与台词顺序，不自动推断日历日期或倒叙事件的发生时间。过滤能限制提供给模型的原作资料，不能保证模型完全不编造。
-
-重新导入顺序元数据（不改原台词和向量）：
-
-```powershell
-cd hiyoribot-backend
-.\venv\Scripts\python.exe import_story_timeline.py 'E:\游戏目录\root.pfs' --dry-run
-.\venv\Scripts\python.exe import_story_timeline.py 'E:\游戏目录\root.pfs'
-```
-
-回退进度不会删除旧聊天；要体验另一条分支，建议另开会话。进度过滤不会重写用户已有的角色卡或聊天记录。
-
-## 一条消息怎样运行
+## 对话流程
 
 ```text
-用户消息
-  ├─ 角色的 System Prompt（PostgreSQL）
-  ├─ 相关原作角色资料（独立 role_knowledge 表，pgvector 召回）
-  ├─ 同一会话最近的消息和旧问答摘要（短期上下文）
-  └─ pgvector 找到的已确认现实事实或本会话角色扮演记忆
-       ↓
-     本机模型或 DeepSeek → 按需调用查询工具 → 读取结果继续判断 → 流式回复 → 保存完整问答
-       ↓
-     后台提取用户原话中的稳定信息 → 本地 embedding → 待确认记忆
-     旧完整问答积累后 → 更新可编辑摘要
+验证身份并去重 → 私聊/@/真实引用立即响应，普通群消息进入旁听
+→ 读取本会话累计摘要和允许使用的画像
+→ 原始人设＋QQ规则＋摘要＋未压缩完整原文＋当前消息
+→ 模型选择工具 → 工具结果交回模型 → 正式文字回复
+→ 保存完整问答／发送回执 → 后台按批次更新摘要与画像
 ```
 
-完整聊天记录和给模型使用的上下文分开保存。短期上下文最多取最近 24 条消息，按完整问答及其工具消息做约 12,000 字符裁剪；最新一轮整体保留，可能略超预算。长期记忆按向量相似度先取 12 条候选，过滤后结合重要度选最多 5 条。借鉴了 SillyTavern 将角色设定、聊天历史和按需注入的信息分开处理的思路，未复制其代码。参考：[SillyTavern Prompt 文档](https://github.com/SillyTavern/SillyTavern-Docs/blob/main/Usage/Prompts/index.md)、[World Info 文档](https://github.com/SillyTavern/SillyTavern-Docs/blob/main/Usage/worldinfo.md)。
+原始人设完整保存在 `rolecards/izumi-hiyori.json`。请求时只屏蔽原稿固定输出结构、状态栏、内心OS、记忆锚点和强制剧情推进章节；追加QQ规则，不预设地点、不编造当前动作，不输出旁白或OS。只有配置绑定的本人QQ是哥哥，其他成员保持独立身份。
 
-原作角色资料与用户长期记忆使用不同的表。前者存角色经历、风格和剧情线索，按当前角色名和消息语义检索；后者区分现实、角色扮演与假设。角色设定窗口会显示当前角色的资料条数。改变角色名称后，旧角色资料不会注入新角色的聊天。
+每群50条成员消息整理一次，机器人回复不计数，图片/语音仅为类型占位。可沉默，有必要才运行角色Agent主动接话；同群至少5分钟、滚动一小时最多3次，失败或不确定发送尝试也占冷却。新消息触发一次复核，复核期间再次来消息或收到直接互动就弃稿；重启不补发旧稿。本人可在群发 `/旁听 开启`、`/旁听 关闭`。
 
-本地已整理的和泉妃爱资料在 `roleplay_data/hiyori_knowledge.jsonl`，是从用户提供的游戏脚本归纳的中文短句，每条保留脚本与行号，不保存原台词。当前共 32 条。修改资料文件后，从 `hiyoribot-backend` 目录运行以下命令重新导入；按来源键更新，重复执行不会增加重复条目：
+私聊每50条成功保存的用户＋助手消息（25轮完整问答）更新摘要。群摘要与旁听共用50条批次。每批摘要最多600字、累计摘要最多1200字；上下文放累计摘要及摘要截止点之后全部尚未压缩的原文，首次未满50条也完整带入，不限最近24条。仅已被摘要覆盖的旧原文按预算补充；未压缩材料超预算明确失败，不静默删掉中间记录。长摘要输入完整分块处理。
+
+画像与摘要独立：直接互动首次20条、以后每50条；旁听首次10条有效发言、以后25条，在群观察批次完成后检查。好感度初始50、范围-100～100，直接互动单批增减-5～5；旁听不改变身份、相处感受和分值。群回复共享本群多人上下文，只读取本群公开证据支持的观察。
+
+只读工具：真实时间、联网搜索、当前私聊／群历史关键词查询、批次摘要关键词查询、用户文字事实／偏好查询。保留最多4轮工具、总共8次。执行记录随回复存入数据库，不把内部思考或工具日志发到QQ。
+
+## 本机／服务器准备
+
+需要Python 3.11+和已经登录、提供OneBot 11反向WebSocket的NapCat。本分支只提供应用部署步骤，NapCat/QQ本身独立安装及登录。
 
 ```powershell
-.\venv\Scripts\python.exe import_role_knowledge.py
+python -m venv E:\unser\q\hiyoribot_flash\env
+E:\unser\q\hiyoribot_flash\env\Scripts\python.exe -m pip install -r hiyoribot-backend/requirements.txt -r hiyoribot-qq/requirements.txt
+$env:HIYORI_FLASH_HOME='E:\unser\q\hiyoribot_flash'
+$env:HIYORI_CONFIG="$env:HIYORI_FLASH_HOME\config.yaml"
+$env:HIYORI_QQ_ENV_FILE="$env:HIYORI_FLASH_HOME\qq.env"
 ```
 
-## 启动
+把后端config.example.yaml复制到上面的私有config.yaml，填写DeepSeek密钥、bot/owner QQ、独立后端令牌，启用qq_enabled；SQLite和profiles必须指向仓库外绝对路径。环境变量DEEPSEEK_API_KEY覆盖YAML中的api_key。把hiyoribot-qq/.env.example复制到qq.env，填写ONEBOT_ACCESS_TOKEN及匹配的HIYORI_BACKEND_TOKEN。
 
-1. 准备本机或远程 PostgreSQL，并确认该实例已安装 pgvector 扩展。连接用户需要能执行 `CREATE EXTENSION vector` 和建表语句；表结构见 [schema.sql](hiyoribot-backend/schema.sql)。
-
-2. 在本地 `hiyoribot-backend/config.yaml` 填入 `database_url`，例如 `postgresql://用户名:密码@主机:5432/数据库名`。也可以在启动后端的终端设置 `DATABASE_URL` 环境变量；环境变量优先。请不要把真实连接串提交到代码库。
-
-   ```yaml
-   database_url: "postgresql://用户名:密码@主机:5432/数据库名"
-   ```
-
-   配置后可先在 `hiyoribot-backend` 目录运行 `python -c "import storage; storage.init_db(); print('database ready')"` 检查连接、pgvector 扩展与建表权限。
-
-3. 安装后端依赖并启动：
-
-   ```powershell
-   cd E:\unser\Desktop\hiyori_bot\hiyoribot-backend
-   python -m venv .venv
-   .\.venv\Scripts\Activate.ps1
-   python -m pip install -r requirements.txt
-   python -m uvicorn main:app --reload
-   ```
-
-4. 在 [聊天页面](http://127.0.0.1:8000/) 使用。接口文档在 [API Docs](http://127.0.0.1:8000/docs)。数据库表在第一次需要时自动创建。
-
-项目不再附带 Docker 配置。数据库数据由你选择的 PostgreSQL 实例管理；后端只通过连接串访问。
-
-### 当前电脑的本地数据库
-
-PostgreSQL 16.15 和 pgvector 0.8.6 已安装到 `E:\unser\q\postgresql`，数据目录是 `E:\unser\q\postgresql-data`。连接串保存在被 Git 忽略的 `hiyoribot-backend/config.yaml`，请勿公开该文件。
-
-数据库当前按需手动启动，重启电脑后运行：
+NapCat反向WS地址：`ws://127.0.0.1:8086/onebot/v11/ws`，令牌匹配ONEBOT_ACCESS_TOKEN。后端默认127.0.0.1:8000、网关127.0.0.1:8086，不提供公开网页管理面板。
 
 ```powershell
-& 'E:\unser\q\postgresql\Library\bin\pg_ctl.exe' -D 'E:\unser\q\postgresql-data' -l 'E:\unser\q\postgresql-data\server.log' -w start
+E:\unser\q\hiyoribot_flash\env\Scripts\python.exe tools/start_qq.py
+# 只停止网关；后端可单独停止
+E:\unser\q\hiyoribot_flash\env\Scripts\python.exe tools/start_qq.py --stop
+E:\unser\q\hiyoribot_flash\env\Scripts\python.exe tools/start_hiyoribot.py --stop
 ```
 
-停止时运行：
+Linux使用仓库外虚拟环境，安装同样两份requirements；设置HIYORI_FLASH_HOME、HIYORI_CONFIG、HIYORI_QQ_ENV_FILE为服务器绝对路径，并把YAML中的sqlite_path/profile_home/qq_profile_home改为Linux路径，再用该虚拟环境的Python运行tools/start_qq.py。无需Docker、GPU或PostgreSQL。每个SQLite文件只允许一个后端进程，不使用多worker；不同群和用户通过线程内锁隔离，模型请求期间不持有数据库写事务。
+
+## 数据与备份
+
+flash从新SQLite开始，原PostgreSQL及其备份不迁移、不删除。运行数据默认位于用户目录 `.local/share/hiyoribot/flash`，可通过上面的环境变量改位置。NoneBot另有网关去重SQLite。角色卡随代码发布，密钥、画像、日志和数据库只留本机。
+
+SQLite启用外键、WAL和写入等待；摘要、批次游标、好感变动使用短事务及唯一约束。群原文保留7天，必要画像证据和摘要长期保留；私聊完整保存。撤回会清除原文及相关旁听证据，并清空无法可靠排除影响的累计摘要和本群摘要存档。
 
 ```powershell
-& 'E:\unser\q\postgresql\Library\bin\pg_ctl.exe' -D 'E:\unser\q\postgresql-data' -m fast -w stop
+python tools/database_backup.py init --database 'E:\unser\q\hiyoribot_flash\hiyoribot.sqlite3'
+python tools/database_backup.py status --database 'E:\unser\q\hiyoribot_flash\hiyoribot.sqlite3'
+python tools/database_backup.py backup --database 'E:\unser\q\hiyoribot_flash\hiyoribot.sqlite3'
+python tools/database_backup.py check --file 'E:\实际备份路径.sqlite3'
+# 先停后端，恢复前再自动备份；确认名称必须等于目标数据库文件名
+python tools/database_backup.py restore --database 'E:\unser\q\hiyoribot_flash\hiyoribot.sqlite3' --file 'E:\实际备份路径.sqlite3' --confirm-restore hiyoribot.sqlite3
 ```
 
-数据库只供本机项目使用。网页后端仍需按上面的 Uvicorn 命令启动。
+备份使用SQLite在线backup接口及SHA256/完整性校验，包含WAL中已提交记录，不直接拷贝正在写入的数据库。恢复受单进程锁保护。
 
-### 模型配置
-
-在 `hiyoribot-backend/config.yaml` 写 DeepSeek `api_key`，或在**启动后端的同一个终端**设置环境变量：
+## 验证
 
 ```powershell
-$env:DEEPSEEK_API_KEY = Read-Host "DeepSeek API Key"
+python tools/verify_group.py
+# 使用当前配置模型，会产生API费用；只用临时SQLite和合成资料，不向QQ发消息
+python tools/verify_group.py --live-model
+# 在hiyoribot-qq目录验证网关
+python -m unittest -v test_gateway
 ```
 
-DeepSeek 模式的环境变量优先于 YAML。`config.yaml` 已被 Git 忽略，[配置示例](hiyoribot-backend/config.example.yaml)没有真实 Key。配置里的 `auto_extract_memory: false` 可以关闭每轮的自动提取；默认开启时，每轮成功聊天会增加一次模型请求。本地模式请求基础辅助模型，DeepSeek 模式请求云端。
-
-### 本地向量模型
-
-向量使用 FastEmbed 的 `BAAI/bge-small-zh-v1.5`，维度为 512。第一次提取或检索长期记忆时会下载约 90 MB 模型，之后使用本地缓存；这一步不调用 DeepSeek 的 embedding API。模型与维度见 [FastEmbed 官方列表](https://qdrant.github.io/fastembed/examples/Supported_Models/)。
-
-### 模型主动工具查询
-
-发送框下方默认勾选「允许查询工具」。模型可按需要调用五个只读工具：`get_current_time` 查询北京时间，`search_user_memory` 检索用户长期记忆，`search_character_knowledge` 检索当前角色的原作资料，`search_chat_history` 用关键词查当前会话的旧消息，`search_web` 联网搜索公开信息。已有上下文足够时可以直接回复；查询结果不足时可以换关键词继续查。
-
-每条消息最多 4 轮工具调用、8 次执行，然后再请求一次模型直接回复。相同查询在本轮内复用结果；参数错误和工具失败会交回模型处理。工具结果仅作参考资料，当前会话和角色范围由后端限定。查询循环见 `agent_service.py`，工具定义与执行见 `agent_tools.py`。
-
-页面用折叠区域展示每次调用的参数、结果与轮次，成功聊天后保存在 `message.agent_messages`；刷新旧会话也能查看。下一轮聊天会按完整协议回传这些工具消息与模型返回的 `reasoning_content`，符合 [DeepSeek 思考模式的工具调用要求](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)。思考开关和工具开关可以独立使用；多次调用会增加模型请求次数和等待时间。
-
-联网搜索使用 [DDGS](https://github.com/deedy5/ddgs) 的 Bing 后端，无需新增 API Key。每次最多取 5 条标题、摘要与链接，支持 `timelimit` 最近一天 `d`、一周 `w`、一月 `m`、一年 `y`。网页调用记录中的来源可点击；返回的是搜索摘要，不是网页全文，检索时间也不等于发布时间。查询只发送模型选出的公开关键词，搜索失败会作为工具错误交回模型处理。需要代理时可在启动后端的终端设置 `DDGS_PROXY` 环境变量，地址填自己的本机代理。
-
-### 日语 TTS 配音
-
-已用共通线和妃爱线的原版日文台词与配音做本机试训，训练数据和最终权重都留在仓库外，详见 [试训说明](tools/README.md)。在被 Git 忽略的 `hiyoribot-backend/config.yaml` 配置本机目录：
-
-```yaml
-tts_home: 'E:/unser/q/hiyori_tts'
-```
-
-也可设置 `HIYORI_TTS_HOME` 环境变量。目录内需保留 `pilot_v1/active_model.json`、训练参考音频、`GPT-SoVITS` 和独立的 `env`。聊天页面每条助手回复下方有「妃爱配音」按钮；点击后按原顺序保留全部台词，要求配置的模型完整、忠实地译成日语，再用选定的最终权重在本机生成音频。按当前角色回复约定，括号内容作为动作说明跳过；代码块不朗读，Markdown 链接保留可见文字。长译文分段合成后拼接，不挑一两句或做摘要。
-
-页面显示完整日语译文，并可展开「查看中文配音原文」核对。翻译仍可能有错误，实际结果以中日对照和试听为准。它不会配音模型思考内容，也不会自动播放每条消息。翻译会增加一次模型请求，本地模式使用基础辅助模型，DeepSeek 模式使用收费 API；同一回复再次请求时读取本机 `pilot_v1/web_audio` 缓存。翻译规则、提供方与辅助模型配置参与缓存键，旧版摘要配音不再自动复用；已有页面需刷新并重新点击配音。
-
-### 导入本机汉化对话
-
-游戏汉化补丁内已有中文剧本，无需调用翻译 API。当前导入范围是共通线与妃爱线的 87 个脚本；其他角色路线和额外成人场景不在范围内。每条正文保留脚本名、序号、说话人和汉化原话；相邻对话另做向量索引。两张原作对话表与用户长期记忆表分开，聊天时只召回少量相关片段。
-
-先从你自己的游戏包提取汉化补丁中的 PF6 文件 `hamidashi.pfs.099`，然后在后端目录运行：
-
-```powershell
-.\.venv\Scripts\python.exe import_game_dialogue.py 'E:\你的路径\hamidashi.pfs.099' --dry-run
-.\.venv\Scripts\python.exe import_game_dialogue.py 'E:\你的路径\hamidashi.pfs.099'
-```
-
-`--dry-run` 只检查；正式导入可重复运行，不会累积重复记录。原始游戏包和全文未加入项目文件。该导入程序只适配当前验证过的汉化包布局，遇到其他版本会因脚本数或正文数不符而停止。
-
-## 页面和接口
-
-- 角色设定：查看与修改名称、描述、性格、背景、说话方式及 System Prompt；每轮请求从数据库读取当前版本并组合成 System 消息。
-- 会话：按会话保存完整的用户和助手消息；网页可切换旧会话或开始新会话。
-- 模型思考：发送框下方默认勾选「显示模型思考」。DeepSeek 的思考文本与正式回复分开流式显示和保存，历史会话中可展开查看；取消勾选会关闭下一轮的思考模式。思考模式可能增加等待时间和 token 用量。
-- 长期记忆：自动提取候选、查看来源、确认分类和替换、手动新增、编辑、合并、调整 1～5 的重要度，以及删除。
-- `POST /chat/stream`：请求体可传 `thinking: true/false`（默认 `true`，本地模式忽略）、`generation_id`；SSE 包含 `meta`、`reasoning_delta`、`delta`、工具事件、`context_used`、`cancelled`、`done` 或 `error`。`POST /chat` 返回可选的 `reasoning` 和 `recalled_context`。
-- `POST /generation/{id}/cancel`；`GET/POST/PUT /conversations/{id}/summary`；`GET /memories/{id}/conflicts`、`POST /memories/{id}/review`；`POST /tts/jobs`、`GET /tts/jobs/{id}`；`GET /health`。
-- `GET/PUT /character`、`GET /character/knowledge`（角色资料及原作对话条数）、`GET /conversations`、`GET /conversations/{id}/messages`、`GET/POST /memories`、`PUT/DELETE /memories/{id}`、`POST /memories/merge`。
-
-“遗忘”会从长期记忆表删除那条内容，**不会删除原聊天记录**；最近聊天消息仍可能把同一事实带给模型。QQ入口有独立认证与用户/群资料隔离，网页管理接口仍仅供本机使用，服务请只绑定在本机。
-
-群内默认每50条消息观察一次，可保持沉默；真实 @或引用机器人的本群消息即时回复。本人通过 `/旁听 开启`、`/旁听 关闭` 管理当前群。主动发言有5分钟冷却和每小时3次上限，旁听画像不影响好感度。数据保留与部署、测试细节见 [QQ网关说明](hiyoribot-qq/README.md)。
-
-## 检查
-
-在 `hiyoribot-backend` 目录执行：
-
-```powershell
-python -m unittest discover -s tests -v
-node --check ..\hiyoribot-frontend\app.js
-```
-
-这些检查使用模拟的模型和数据库调用。真正的 PostgreSQL、pgvector、DeepSeek 联通性需要启动相应服务后再验证。
-
-配置好 PostgreSQL＋pgvector 后，可以执行一次真正的数据库验收。测试会创建带唯一前缀的会话和记忆，并在结束时清理：
-
-```powershell
-$env:RUN_DB_TEST = "1"
-python -m unittest discover -s tests -v
-Remove-Item Env:RUN_DB_TEST
-```
+现有PG／网页／TTS历史测试保留在tools/legacy_tests，原实现保存在main分支。旧的游戏导入、训练及语音脚本不是flash运行链路，不会被启动或自动导入；需要原环境时使用main分支。
