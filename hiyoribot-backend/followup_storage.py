@@ -57,6 +57,13 @@ def open_window(c,body):
         c.execute('''UPDATE qq_followup_window SET anchor_message_id=?,anchor_message_ids=?,anchor_text=?,remaining=5,last_sent=?
             WHERE bot_id=? AND group_id=?''',(body.message_id,storage.json_dump(body.segment_message_ids or [body.message_id]),
             body.message,time.time(),body.bot_id,body.group_id))
+        if body.reply_to_message_id is not None:
+            source=c.execute('SELECT id FROM qq_group_message WHERE bot_id=? AND group_id=? AND message_id=? AND NOT is_bot AND NOT recalled',
+                             (body.bot_id,body.group_id,body.reply_to_message_id)).fetchone()
+            if source:
+                current=window(c,body.bot_id,body.group_id)
+                c.execute('INSERT INTO qq_followup_origin VALUES(?,?,?,?)',
+                          (body.bot_id,body.group_id,current['version'],source['id']))
 
 
 def reserve(c,body,row_id,eligible):
@@ -70,8 +77,13 @@ def reserve(c,body,row_id,eligible):
     reason=None
     if not body.text.strip() or body.text.lstrip().startswith(('/','!','！')):
         reason='非文字或命令，仅计数'
-    elif time.time()-w['last_sent']<10:
-        reason='10秒冷却，仅计数'
+    elif getattr(body,'addresses_other',False):
+        reason='明确@其他成员，仅计数'
+    elif body.quoted_message_id is not None:
+        target=c.execute('SELECT is_bot,user_id FROM qq_group_message WHERE bot_id=? AND group_id=? AND message_id=?',
+                         (body.bot_id,body.group_id,body.quoted_message_id)).fetchone()
+        if target and not target['is_bot'] and target['user_id']!=body.user_id:
+            reason='明确引用其他成员，仅计数'
     c.execute('''INSERT INTO qq_followup_job(message_row_id,bot_id,group_id,window_version,state,saved_eligible,reason)
         VALUES(?,?,?,?,?,?,?)''',(row_id,body.bot_id,body.group_id,w['version'],'skipped' if reason else 'pending',eligible,reason or '等待判断'))
     if not reason:
@@ -91,7 +103,6 @@ def valid(c,job):
     state=c.execute('SELECT enabled,direct_inflight FROM qq_group_state WHERE bot_id=? AND group_id=?',
                     (job['bot_id'],job['group_id'])).fetchone()
     return bool(state and state['enabled'] and not state['direct_inflight'] and w['anchor_message_id']
-                and time.time()-w['last_sent']>=10
                 and w['version']==job['window_version'] and not job['recalled'] and job['content'] is not None)
 
 

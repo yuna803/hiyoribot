@@ -130,7 +130,7 @@ async def database_error(request,error):
 def health():
     with storage.connect() as c:
         c.execute('SELECT 1').fetchone()
-    return {'app':'HiyoriBot','version':'flash.2','pid':os.getpid(),'database':True,'storage':'sqlite','provider':'deepseek'}
+    return {'app':'HiyoriBot','version':'flash.3','pid':os.getpid(),'database':True,'storage':'sqlite','provider':'deepseek'}
 
 @app.post('/integrations/qq/chat')
 def qq_chat(body:qq_service.QQChatRequest,authorization:str|None=Header(default=None)):

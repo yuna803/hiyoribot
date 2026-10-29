@@ -105,3 +105,8 @@ CREATE TABLE IF NOT EXISTS qq_followup_opened (
  bot_id TEXT NOT NULL, group_id TEXT NOT NULL, message_id TEXT NOT NULL,
  PRIMARY KEY(bot_id,group_id,message_id)
 );
+CREATE TABLE IF NOT EXISTS qq_followup_origin (
+ bot_id TEXT NOT NULL, group_id TEXT NOT NULL, window_version INTEGER NOT NULL,
+ source_message_row_id INTEGER NOT NULL REFERENCES qq_group_message(id),
+ PRIMARY KEY(bot_id,group_id,window_version)
+);

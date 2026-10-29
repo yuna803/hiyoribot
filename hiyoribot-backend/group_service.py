@@ -38,6 +38,7 @@ class Ingest(GroupKey):
     text:str=Field(default='',max_length=32000)
     quoted_message_id:str|None=Field(default=None,pattern=r'^-?[0-9]{1,20}$')
     direct:bool=False
+    addresses_other:bool=False
     sent_at:int=Field(ge=0,le=4102444800)
 
 
@@ -54,6 +55,7 @@ class BotMessage(Recall):
     message:str=Field(max_length=12000)
     opens_window:bool=False
     segment_message_ids:list[str]=Field(default_factory=list,max_length=6)
+    reply_to_message_id:str|None=Field(default=None,pattern=r'^-?[0-9]{1,20}$')
 
 class BotKey(BaseModel):
     model_config=ConfigDict(extra='forbid')

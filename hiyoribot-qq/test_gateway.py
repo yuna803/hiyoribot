@@ -77,6 +77,7 @@ class FollowupGatewayTests(unittest.IsolatedAsyncioTestCase):
         opened=[p for path,p in self.calls if path=='group/bot-message' and p.get('opens_window')]
         self.assertEqual(len(opened),1)
         self.assertEqual(opened[0]['segment_message_ids'],['1001','1002'])
+        self.assertEqual(opened[0]['reply_to_message_id'],'1')
         self.calls.clear()
         self.bot.send.side_effect=[{'message_id':1003},RuntimeError('发送失败')]
         with self.assertRaises(RuntimeError):
@@ -132,6 +133,12 @@ class FollowupGatewayTests(unittest.IsolatedAsyncioTestCase):
         gateway.clear_followup_queue(*key,version=3)
         self.assertEqual(q.qsize(),1)
         self.assertEqual(q.get_nowait()[1],3)
+
+    async def test_followup_distinguishes_real_at_to_another_member(self):
+        real=event(group=True,segments=[MessageSegment.at('77'),MessageSegment.text('你呢？')])
+        ordinary=event(group=True,segments=[MessageSegment.text('我在解释[at]文字，你呢？')])
+        self.assertTrue(gateway.group_payload(real,'99',False)['addresses_other'])
+        self.assertFalse(gateway.group_payload(ordinary,'99',False)['addresses_other'])
 
 
 def event(message_id=1, user_id=7, group=False, segments=None):

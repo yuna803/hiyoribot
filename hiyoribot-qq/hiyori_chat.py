@@ -106,7 +106,7 @@ def message_id_from_ack(ack):
     return None
 
 
-async def register_sent(bot_id, group_id, ack, message, *, opens_window=False, segment_message_ids=None):
+async def register_sent(bot_id, group_id, ack, message, *, opens_window=False, segment_message_ids=None,reply_to_message_id=None):
     message_id = message_id_from_ack(ack)
     if message_id is None:
         return
@@ -114,7 +114,7 @@ async def register_sent(bot_id, group_id, ack, message, *, opens_window=False, s
     try:
         result=await api("POST", "group/bot-message", payload={"bot_id": bot_id, "group_id": group_id,
                   "message_id": message_id, "message": message,'opens_window':opens_window,
-                  'segment_message_ids':segment_message_ids or []})
+                  'segment_message_ids':segment_message_ids or [],'reply_to_message_id':reply_to_message_id})
         if opens_window:
             clear_followup_queue(bot_id,group_id,version=result.get('window_version'))
     except Exception:
@@ -142,7 +142,7 @@ async def send_chat_reply(bot,event,text):
             await register_sent(str(bot.self_id),str(event.group_id),ack,part)
     if complete and ids and isinstance(event,GroupMessageEvent):
         await register_sent(str(bot.self_id),str(event.group_id),{'message_id':ids[-1]},text,
-                            opens_window=True,segment_message_ids=ids)
+                            opens_window=True,segment_message_ids=ids,reply_to_message_id=str(event.message_id))
     return complete
 
 
@@ -231,6 +231,7 @@ def group_payload(event, bot_id, direct):
     return {"bot_id": bot_id, "user_id": str(event.user_id), "group_id": str(event.group_id),
             "message_id": str(event.message_id), "nickname": (event.sender.card or event.sender.nickname or "")[:80],
             "message": message, "text": text, "quoted_message_id": quote_id(event), "direct": direct,
+            'addresses_other':any(s.type=='at' and str(s.data.get('qq'))!=bot_id for s in segments),
             "sent_at": int(event.time)}
 
 
@@ -323,7 +324,7 @@ async def send_candidate(bot, candidate_id, group_id):
             return
         state = "sent"
         message_id = message_id_from_ack(ack)
-        await register_sent(bot_id, group_id, ack, reply,opens_window=True)
+        await register_sent(bot_id, group_id, ack, reply,opens_window=True,reply_to_message_id=result.get('quote_message_id'))
     except Exception:
         logger.warning("QQ群候选消息发送失败")
     finally:

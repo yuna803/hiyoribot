@@ -46,11 +46,6 @@ class FollowupTests(unittest.TestCase):
     def open(self,mid='-100',group=GROUP):
         group_storage.bot_message(group_service.BotMessage(bot_id=BOT,group_id=group,message_id=mid,
             message='你平时喜欢喝什么茶？',opens_window=True,segment_message_ids=[mid]))
-        self.cool(group)
-
-    def cool(self,group=GROUP):
-        with storage.connect(write=True) as c:
-            c.execute('UPDATE qq_followup_window SET last_sent=unixepoch()-11 WHERE bot_id=? AND group_id=?',(BOT,group))
 
     def window(self,group=GROUP):
         with storage.connect(write=True) as c:
@@ -77,7 +72,7 @@ class FollowupTests(unittest.TestCase):
         body=group_service.Ingest(bot_id=BOT,group_id=GROUP,user_id=USER,message_id='7',message='ひよひよ',text='ひよひよ',sent_at=1)
         self.assertEqual(group_service.ingest(body,cfg)['trigger_reason'],'name')
 
-    def test_exact_five_duplicate_media_cooldown_and_independent_groups(self):
+    def test_exact_five_duplicate_media_immediate_followup_and_independent_groups(self):
         self.open()
         first=self.ingest(1)
         self.assertTrue(first['followup'])
@@ -93,9 +88,11 @@ class FollowupTests(unittest.TestCase):
         with storage.connect(write=True) as c:
             c.execute('UPDATE qq_followup_window SET last_sent=unixepoch()')
         route=self.ingest(8)
-        self.assertFalse(route['followup'])
+        self.assertTrue(route['followup'])
         self.assertEqual(route['remaining'],4)
         self.ask.assert_not_called()
+        self.assertTrue(service.handle(self.request(8,route),self.config)['send'])
+        self.assertTrue(service.handle(self.request(8,route,'claim'),self.config)['send'])
         self.open('-102')
         with storage.connect(write=True) as c:
             c.execute('UPDATE qq_followup_window SET last_sent=unixepoch()-86400')
@@ -262,6 +259,29 @@ class FollowupTests(unittest.TestCase):
             self.assertEqual(client.post('/integrations/qq/group/followup',json=body).status_code,403)
             response=client.post('/integrations/qq/group/followup',headers={'Authorization':'Bearer test-token'},json={**body,'group_id':'830002'})
             self.assertFalse(response.json()['send'])
+        self.ask.assert_not_called()
+
+    def test_classifier_receives_original_addressee_across_intervening_messages(self):
+        self.ingest(1,'妃爱，午饭有什么建议？')
+        group_storage.bot_message(group_service.BotMessage(bot_id=BOT,group_id=GROUP,message_id='-100',
+            message='你想吃什么？我想吃清淡点的。',opens_window=True,reply_to_message_id='1'))
+        self.ingest(2,'我刚看完一个视频',user=OTHER)
+        self.ingest(3,'[image]',plain='',user=OTHER)
+        route=self.ingest(4,'你喜欢吃什么？')
+        self.assertTrue(service.handle(self.request(4,route),self.config)['send'])
+        payload=self.ask.call_args_list[0].args[1]
+        self.assertTrue(payload['same_as_original_speaker'])
+        self.assertEqual(payload['anchor']['in_reply_to']['user_id'],USER)
+        self.assertEqual(payload['anchor']['in_reply_to']['message_id'],'1')
+        self.assertEqual(len(payload['window_messages']),3)
+
+    def test_explicit_other_at_or_quote_consumes_slot_without_model(self):
+        self.open()
+        self.assertFalse(self.ingest(1,'你喜欢吃什么？',addresses_other=True)['followup'])
+        # 先存下另一位成员的话，再明确引用这句话；不会误判为问机器人。
+        self.ingest(2,'说说你喜欢哪种茶',user=OTHER)
+        self.assertFalse(self.ingest(3,'你呢？',quoted_message_id='2')['followup'])
+        self.assertEqual(self.window()['remaining'],2)
         self.ask.assert_not_called()
 
 
