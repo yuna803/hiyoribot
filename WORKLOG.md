@@ -1,9 +1,16 @@
 # 工作记录
 
+## 2026-10-29：flash服务器部署与QQ登录待验收
+
+- flash代码提交cfb8692及bridge加载修复80fab4a已推送；服务器运行80fab4a，文档提交与运行代码版本分别记录。新后端使用独立Python3.11环境和仓库外SQLite，健康检查storage=sqlite、database=true，完整性ok、WAL启用；未安装PostgreSQL驱动、向量或语音依赖，旧数据未迁移。
+- 服务器后端25项、网关13项测试通过。真实DeepSeek仅用临时SQLite及合成资料验证4个自然话题、时间工具、50条完整覆盖摘要和群候选，全部通过，没有向QQ发送合成测试消息。
+- 旧NoneBot启动文件、环境、unit/drop-in及聊天数据已备份；仅关闭旧聊天开关，新增flash bridge并重启NoneBot，保留其他插件。后端和NoneBot均active并启用开机启动；QQ容器未重启，RestartCount仍为0。密钥、配置、日志、画像、SQLite和登录二维码均留仓库外。
+- QQ重连提示Missing X-Self-ID，进一步只读查询QQ连接端确认online=false、账号ID为空；不能把容器运行或历史配置认作当前登录成功。现有PMHQ模式不支持快速登录，已提取登录二维码交用户手动确认，真实私聊、群@和满50条主动插话仍待登录后验收。没有伪造握手ID或绕过QQ登录。
+
 ## 2026-10-28：flash提交与服务器部署准备
 
 - 用户明确要求提交推送flash后部署服务器。核对当前分支flash、后端25项和网关13项已通过，继续扫描实际暂存集与私有资产。
-- 只读连通原服务器，核实在线QQ账号与当前配置一致，现有NoneBot2/OneBot/httpx版本与本机一致。服务器已有Python3.11.16及SQLite3.53.1；系统Python3.10的SQLite3.37不作为本次运行环境。
+- 只读连通原服务器，核实已有QQ账号配置与当前配置一致，现有NoneBot2/OneBot/httpx版本与本机一致。服务器已有Python3.11.16及SQLite3.53.1；系统Python3.10的SQLite3.37不作为本次运行环境。该阶段未验证QQ实时登录状态，后续实测见上方记录。
 - 为保留其他插件且避免重启QQ容器，部署采用独立SQLite后端＋既有NoneBot加载flash bridge；关闭旧聊天功能，不删除旧插件/会话/TTS数据。新增systemd模板、bridge加载器及回滚说明。服务器当前可用内存约352MiB，后端设置160MiB软限、256MiB硬限及单核配额，不启动GPU/语音模型。
 
 
