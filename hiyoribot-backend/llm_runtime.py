@@ -32,12 +32,12 @@ def fit_messages(messages,config,tools=None,*,output_tokens=1024):
         del fitted[users[0]:users[1]]
     return fitted
 
-def json_output(instructions,payload,schema,config):
+def json_output(instructions,payload,schema,config,*,max_tokens=3072,timeout=120):
     messages=[{'role':'system','content':instructions+'\n输出符合以下schema的JSON：'+json.dumps(schema.model_json_schema(),ensure_ascii=False)},
               {'role':'user','content':json.dumps(payload,ensure_ascii=False)}]
-    with OpenAI(api_key=config.api_key,base_url=config.base_url,timeout=120,max_retries=0) as client:
+    with OpenAI(api_key=config.api_key,base_url=config.base_url,timeout=timeout,max_retries=0) as client:
         response=client.chat.completions.create(model=config.model,messages=fit_messages(messages,config,output_tokens=3072),
-            response_format={'type':'json_object'},**auxiliary_options(config))
+            response_format={'type':'json_object'},**{**auxiliary_options(config),'max_tokens':max_tokens})
     choice=response.choices[0] if response.choices else None
     if choice is None or choice.finish_reason!='stop':
         raise ValueError('模型结构化输出不完整')

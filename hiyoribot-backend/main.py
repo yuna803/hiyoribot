@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import os
+import re
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,6 +15,7 @@ from pydantic import BaseModel,ConfigDict,Field,field_validator
 import agent_service
 import chat_service
 import group_service
+import followup_service
 import profile_service
 import profile_storage
 import qq_service
@@ -40,9 +42,21 @@ class AppConfig(BaseModel):
     qq_bot_id:str=''
     qq_owner_id:str=''
     qq_backend_token:str=''
+    qq_name_trigger_patterns:list[str]=Field(default_factory=lambda:['妃爱'],max_length=8)
     qq_nickname:str=Field(default='',exclude=True)
     qq_group_id:str=Field(default='',exclude=True)
     qq_message_id:str=Field(default='',exclude=True)
+
+    @field_validator('qq_name_trigger_patterns')
+    @classmethod
+    def valid_name_patterns(cls,patterns):
+        for pattern in patterns:
+            try:
+                if len(pattern)>200 or re.compile(pattern).search('') is not None:
+                    raise ValueError('名字正则不能过长或匹配空串')
+            except re.error as error:
+                raise ValueError('名字正则格式无效') from error
+        return patterns
 
     @field_validator('sqlite_path','profile_home','qq_profile_home')
     @classmethod
@@ -116,7 +130,7 @@ async def database_error(request,error):
 def health():
     with storage.connect() as c:
         c.execute('SELECT 1').fetchone()
-    return {'app':'HiyoriBot','version':'flash.1','pid':os.getpid(),'database':True,'storage':'sqlite','provider':'deepseek'}
+    return {'app':'HiyoriBot','version':'flash.2','pid':os.getpid(),'database':True,'storage':'sqlite','provider':'deepseek'}
 
 @app.post('/integrations/qq/chat')
 def qq_chat(body:qq_service.QQChatRequest,authorization:str|None=Header(default=None)):
@@ -159,6 +173,12 @@ def qq_group_recall(body:group_service.Recall,authorization:str|None=Header(defa
 def qq_group_bot_message(body:group_service.BotMessage,authorization:str|None=Header(default=None)):
     qq_group_config(authorization,body.bot_id)
     return group_service.store.bot_message(body)
+
+
+@app.post('/integrations/qq/group/followup')
+def qq_group_followup(body:followup_service.Request,authorization:str|None=Header(default=None)):
+    config=qq_group_config(authorization,body.bot_id)
+    return followup_service.handle(body,resolve_config())
 
 
 @app.get('/integrations/qq/group/candidates')

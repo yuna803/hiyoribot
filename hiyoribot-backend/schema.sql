@@ -86,3 +86,22 @@ CREATE TABLE IF NOT EXISTS summary_batch (
  source_ids TEXT NOT NULL, coverage TEXT NOT NULL, summary TEXT NOT NULL CHECK(length(summary)<=600),
  created_at REAL NOT NULL DEFAULT (unixepoch()), UNIQUE(scope_key,last_id)
 );
+
+-- 独立附表使已部署的flash库可以原位升级，不改旧聊天或摘要。
+CREATE TABLE IF NOT EXISTS qq_followup_window (
+ bot_id TEXT NOT NULL, group_id TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 0,
+ anchor_message_id TEXT, anchor_message_ids TEXT NOT NULL DEFAULT '[]', anchor_text TEXT NOT NULL DEFAULT '', remaining INTEGER NOT NULL DEFAULT 0,
+ last_sent REAL NOT NULL DEFAULT 0, PRIMARY KEY(bot_id,group_id)
+);
+CREATE TABLE IF NOT EXISTS qq_followup_job (
+ message_row_id INTEGER PRIMARY KEY REFERENCES qq_group_message(id),
+ bot_id TEXT NOT NULL, group_id TEXT NOT NULL, window_version INTEGER NOT NULL,
+ state TEXT NOT NULL, saved_eligible INTEGER NOT NULL DEFAULT 0,
+ reason TEXT NOT NULL DEFAULT '', draft TEXT, observed_id INTEGER,
+ created_at REAL NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS followup_group_idx ON qq_followup_job(bot_id,group_id,state);
+CREATE TABLE IF NOT EXISTS qq_followup_opened (
+ bot_id TEXT NOT NULL, group_id TEXT NOT NULL, message_id TEXT NOT NULL,
+ PRIMARY KEY(bot_id,group_id,message_id)
+);

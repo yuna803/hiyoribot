@@ -7,3 +7,5 @@
 启用前备份现有启动文件、私有环境与systemd配置；后端健康后再加载bridge并重启NoneBot。不要重启QQ容器，也不改变QQ认证或OneBot连接配置。桥接只读健康检查为原NoneBot监听地址下的/hiyori-flash/health，包含连接QQ及在线状态。
 
 回滚时停止NoneBot，恢复本次备份的启动文件、环境与unit drop-in，重启NoneBot，再停止hiyoribot-flash。保留新SQLite和旧数据。发布与回滚前都应确认当前实例和PID，不将服务启动当作真实QQ回复已验收。
+
+flash.2在原SQLite增加跟聊附表，不重置聊天、摘要及画像。更新前用database_backup.py在线备份，停止NoneBot后停止后端，再做最终备份及保存私有配置/current指向。切到新release，启动后端健康后再启动NoneBot；QQ客户端不重启。跟聊窗口会重置，不补发旧稿。回退flash.1时还需恢复旧config.yaml（旧版本不接受新增正则配置字段）；通常保留当前SQLite即可，不必倒退已保存的聊天。若必须恢复数据库，停止所有写入方并先备份当前数据。

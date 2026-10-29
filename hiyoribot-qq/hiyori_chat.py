@@ -25,6 +25,8 @@ active_groups = set()
 active_candidates = set()
 background_tasks = set()
 group_versions = {}
+followup_queues = {}
+followup_tasks = {}
 
 
 def bump_group(bot_id, group_id):
@@ -66,20 +68,23 @@ def is_direct(event, bot_id):
     )
 
 
-def make_payload(event: MessageEvent, bot_id: str):
+def make_payload(event: MessageEvent, bot_id: str, *, force=False, trigger_reason='direct'):
     if str(event.user_id) == bot_id or not isinstance(event, (PrivateMessageEvent, GroupMessageEvent)):
         return None
-    if isinstance(event, GroupMessageEvent) and not is_direct(event, bot_id):
+    if isinstance(event, GroupMessageEvent) and not force and not is_direct(event, bot_id):
         return None
     message = "".join(str(s.data.get("text", "")) for s in event.original_message if s.type == "text").strip()
     if not message and isinstance(event, GroupMessageEvent):
         message = "".join(f"[{s.type}]" for s in event.original_message if s.type not in ("text", "at", "reply"))
     if not message:
         return None
-    return {"bot_id": bot_id, "user_id": str(event.user_id),
+    payload={"bot_id": bot_id, "user_id": str(event.user_id),
             "group_id": str(event.group_id) if isinstance(event, GroupMessageEvent) else None,
             "message_id": str(event.message_id), "nickname": (event.sender.card or event.sender.nickname or "")[:80],
             "message": message}
+    if trigger_reason!='direct':
+        payload['trigger_reason']=trigger_reason
+    return payload
 
 
 async def api(method, path, *, payload=None, params=None, timeout=30.0):
@@ -101,14 +106,17 @@ def message_id_from_ack(ack):
     return None
 
 
-async def register_sent(bot_id, group_id, ack, message):
+async def register_sent(bot_id, group_id, ack, message, *, opens_window=False, segment_message_ids=None):
     message_id = message_id_from_ack(ack)
     if message_id is None:
         return
     sent_message(bot_id, group_id, message_id, record=True)
     try:
-        await api("POST", "group/bot-message", payload={"bot_id": bot_id, "group_id": group_id,
-                  "message_id": message_id, "message": message})
+        result=await api("POST", "group/bot-message", payload={"bot_id": bot_id, "group_id": group_id,
+                  "message_id": message_id, "message": message,'opens_window':opens_window,
+                  'segment_message_ids':segment_message_ids or []})
+        if opens_window:
+            clear_followup_queue(bot_id,group_id,version=result.get('window_version'))
     except Exception:
         logger.warning("QQ群消息记录同步失败")
 
@@ -117,6 +125,103 @@ async def send_reply(bot, event, text):
     ack = await bot.send(event, MessageSegment.text(text))
     if isinstance(event, GroupMessageEvent):
         await register_sent(str(bot.self_id), str(event.group_id), ack, text)
+
+
+async def send_chat_reply(bot,event,text):
+    """分段全部成功且都有编号后才把整段角色回复登记为新窗口。"""
+    ids=[]
+    complete=True
+    for start in range(0,len(text),2000):
+        part=text[start:start+2000]
+        ack=await bot.send(event,MessageSegment.text(part))
+        mid=message_id_from_ack(ack)
+        complete=complete and mid is not None
+        if mid is not None:
+            ids.append(mid)
+        if isinstance(event,GroupMessageEvent):
+            await register_sent(str(bot.self_id),str(event.group_id),ack,part)
+    if complete and ids and isinstance(event,GroupMessageEvent):
+        await register_sent(str(bot.self_id),str(event.group_id),{'message_id':ids[-1]},text,
+                            opens_window=True,segment_message_ids=ids)
+    return complete
+
+
+def clear_followup_queue(bot_id,group_id,*,version=None):
+    queue=followup_queues.get((bot_id,group_id))
+    if queue:
+        keep=[]
+        while not queue.empty():
+            item=queue.get_nowait()
+            if version is not None and item[1]==version:
+                keep.append(item)
+        for item in keep:
+            queue.put_nowait(item)
+
+
+async def can_send_group(bot,bot_id,group_id):
+    if get_bots().get(bot_id) is not bot:
+        return False
+    member=await bot.get_group_member_info(group_id=int(group_id),user_id=int(bot_id),no_cache=True)
+    if member.get('shut_up_timestamp') is None:
+        members=await bot.get_group_member_list(group_id=int(group_id),no_cache=True)
+        member=next((m for m in members if str(m.get('user_id'))==bot_id),{})
+    return member.get('shut_up_timestamp') is not None and int(member.get('shut_up_timestamp') or 0)<=int(time.time())
+
+
+async def followup_worker(bot,key,queue):
+    bot_id,group_id=key
+    try:
+        while not queue.empty():
+            event,version=queue.get_nowait()
+            payload={'bot_id':bot_id,'group_id':group_id,'message_id':str(event.message_id),'window_version':version}
+            claimed=False
+            state='failed'
+            try:
+                result=await api('POST','group/followup',payload=payload,timeout=420)
+                if not result.get('send'):
+                    continue
+                if not await can_send_group(bot,bot_id,group_id):
+                    continue
+                local_version=group_versions.get(key,0)
+                permitted=await api('POST','group/followup',payload={**payload,'action':'claim'})
+                claimed=bool(permitted.get('send'))
+                if not claimed or group_versions.get(key,0)!=local_version:
+                    continue
+                reply=permitted.get('reply')
+                if not isinstance(reply,str) or not reply.strip() or len(reply)>12000:
+                    continue
+                try:
+                    complete=await asyncio.wait_for(send_chat_reply(bot,event,reply),timeout=15)
+                    state='sent' if complete else 'uncertain'
+                except (asyncio.TimeoutError,httpx.TimeoutException):
+                    state='uncertain'
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning('QQ群跟聊未完成，保持沉默')
+            finally:
+                try:
+                    await api('POST','group/followup',payload={**payload,
+                        'action':'receipt' if claimed else 'discard','state':state})
+                except Exception:
+                    logger.warning('QQ群跟聊状态同步失败')
+    finally:
+        followup_queues.pop(key,None)
+        followup_tasks.pop(key,None)
+
+
+async def queue_followup(bot,event,version):
+    key=(str(bot.self_id),str(event.group_id))
+    queue=followup_queues.get(key)
+    if queue is None:
+        queue=followup_queues[key]=asyncio.Queue(maxsize=5)
+    if queue.full():
+        await api('POST','group/followup',payload={'bot_id':key[0],'group_id':key[1],
+            'message_id':str(event.message_id),'window_version':version,'action':'discard'})
+        return
+    queue.put_nowait((event,version))
+    if key not in followup_tasks:
+        followup_tasks[key]=asyncio.create_task(followup_worker(bot,key,queue))
 
 
 def group_payload(event, bot_id, direct):
@@ -133,6 +238,7 @@ async def process_message(bot: Bot, event: MessageEvent):
     bot_id = str(bot.self_id)
     if str(event.user_id) == bot_id:
         return
+    route={}
     if isinstance(event, GroupMessageEvent):
         bump_group(bot_id, str(event.group_id))
         text = "".join(str(s.data.get("text", "")) for s in event.original_message if s.type == "text")
@@ -146,10 +252,16 @@ async def process_message(bot: Bot, event: MessageEvent):
             return
         direct = is_direct(event, bot_id)
         try:
-            await api("POST", "group/ingest", payload=group_payload(event, bot_id, direct))
+            route=await api("POST", "group/ingest", payload=group_payload(event, bot_id, direct))
         except Exception:
             logger.warning("QQ群消息采集失败")
-    payload = make_payload(event, bot_id)
+        if direct or route.get('trigger_reason') in ('direct','name'):
+            clear_followup_queue(bot_id,str(event.group_id))
+        elif route.get('accepted') and route.get('followup'):
+            await queue_followup(bot,event,route['window_version'])
+            return
+    named=route.get('trigger_reason')=='name'
+    payload = make_payload(event, bot_id,force=named,trigger_reason='name' if named else 'direct')
     if payload is None:
         return
     key = (bot_id, payload["user_id"])
@@ -176,8 +288,7 @@ async def process_message(bot: Bot, event: MessageEvent):
                 if not isinstance(reply, str) or not reply.strip():
                     raise ValueError("invalid reply")
             reply = reply[:12000]
-            for start in range(0, len(reply), 2000):
-                await send_reply(bot, event, reply[start:start + 2000])
+            await send_chat_reply(bot,event,reply)
         except Exception:
             logger.warning("QQ 消息处理失败，请检查网关及后端状态")
             try:
@@ -198,17 +309,8 @@ async def send_candidate(bot, candidate_id, group_id):
         reply = result.get("reply")
         if target != group_id or not isinstance(reply, str) or not reply.strip():
             raise ValueError("invalid candidate")
-        if get_bots().get(bot_id) is not bot:
-            raise RuntimeError("bot offline")
-        member = await bot.get_group_member_info(group_id=int(group_id), user_id=int(bot_id), no_cache=True)
-        if member.get("shut_up_timestamp") is None:
-            # 个别实现的单成员接口缺字段时，使用成员列表中的明确禁言时间。
-            members = await bot.get_group_member_list(group_id=int(group_id), no_cache=True)
-            member = next((m for m in members if str(m.get("user_id")) == bot_id), {})
-            if member.get("shut_up_timestamp") is None:
-                raise RuntimeError("mute status unavailable")
-        if int(member.get("shut_up_timestamp") or 0) > int(time.time()):
-            raise RuntimeError("bot muted")
+        if not await can_send_group(bot,bot_id,group_id):
+            raise RuntimeError('bot offline, muted or mute status unavailable')
         if group_versions.get((bot_id, group_id), 0) != version:
             raise RuntimeError("group changed after claim")
         message = MessageSegment.text(reply)
@@ -221,7 +323,7 @@ async def send_candidate(bot, candidate_id, group_id):
             return
         state = "sent"
         message_id = message_id_from_ack(ack)
-        await register_sent(bot_id, group_id, ack, reply)
+        await register_sent(bot_id, group_id, ack, reply,opens_window=True)
     except Exception:
         logger.warning("QQ群候选消息发送失败")
     finally:
@@ -277,9 +379,18 @@ async def connected(bot: Bot):
 
 @get_driver().on_bot_disconnect
 async def disconnected(bot: Bot):
+    bot_id=str(bot.self_id)
+    started_bots.discard(bot_id)
     task = poll_tasks.pop(str(bot.self_id), None)
     if task is not None:
         task.cancel()
+    for key,task in list(followup_tasks.items()):
+        if key[0]==bot_id:
+            task.cancel()
+    try:
+        await api('POST','group/startup',payload={'bot_id':bot_id})
+    except Exception:
+        logger.warning('断线跟聊窗口将在重连时清理')
 
 
 @notice_matcher.handle()

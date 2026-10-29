@@ -21,6 +21,9 @@ def material(bot, user, cursor, count):
         return conn.execute('''SELECT m.* FROM qq_group_message m JOIN qq_group_state s USING(bot_id,group_id)
             WHERE m.bot_id=? AND m.user_id=? AND m.id>? AND m.id<=s.through_id
             AND m.profile_eligible AND NOT m.direct AND NOT m.recalled AND m.plain_text IS NOT NULL
+            AND NOT EXISTS(SELECT 1 FROM qq_followup_job j JOIN qq_group_message waiting ON waiting.id=j.message_row_id
+                WHERE j.bot_id=m.bot_id AND waiting.user_id=m.user_id AND j.message_row_id<=m.id
+                AND j.state IN ('pending','processing','prepared'))
             ORDER BY m.id LIMIT ?''',(bot,user,cursor,count)).fetchall()
 
 
@@ -82,7 +85,7 @@ def update(bot,user,config,ask):
                             continue
                         # 撤回可发生在模型请求中；过期和撤回材料一律不再提交。
                         placeholders=','.join('?' for _ in sources)
-                        valid=conn.execute(f'SELECT count(*) AS n FROM qq_group_message WHERE id IN ({placeholders}) AND NOT recalled AND plain_text IS NOT NULL',
+                        valid=conn.execute(f'SELECT count(*) AS n FROM qq_group_message WHERE id IN ({placeholders}) AND NOT recalled AND NOT direct AND profile_eligible AND plain_text IS NOT NULL',
                                            tuple(sources)).fetchone()['n']==len(sources)
                         if not valid:
                             continue

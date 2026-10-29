@@ -7,6 +7,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 import storage
+import followup_storage as follow
 
 
 def ensure(conn, bot, group):
@@ -44,14 +45,15 @@ def ingest(body):
                                                (body.bot_id,body.user_id,digest)).fetchone())
         eligible=(state['enabled'] and not body.direct and not duplicate and len(normalized)>=4
                   and not body.text.lstrip().startswith(('/','！','!')))
-        conn.execute('''INSERT INTO qq_group_message(bot_id,group_id,message_id,user_id,nickname,content,plain_text,
+        row_id=conn.execute('''INSERT INTO qq_group_message(bot_id,group_id,message_id,user_id,nickname,content,plain_text,
             quoted_message_id,sent_at,direct,profile_eligible,text_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)''',
             (body.bot_id,body.group_id,body.message_id,body.user_id,body.nickname,
              body.message if state['enabled'] else None,body.text if state['enabled'] else None,
-             body.quoted_message_id,body.sent_at,body.direct,eligible,digest))
+             body.quoted_message_id,body.sent_at,body.direct,eligible,digest)).lastrowid
+        reserved=follow.reserve(conn,body,row_id,eligible) if state['enabled'] else {}
         if eligible:
             conn.execute('INSERT INTO qq_passive_profile(bot_id,user_id) VALUES(?,?) ON CONFLICT DO NOTHING', (body.bot_id,body.user_id))
-        return dict(enabled=state['enabled'],pending=pending(conn,state),accepted=True)
+        return dict(enabled=state['enabled'],pending=pending(conn,state),accepted=True,**reserved)
 
 
 def toggle(body, owner):
@@ -60,6 +62,7 @@ def toggle(body, owner):
     with storage.connect(write=True) as conn:
         state=ensure(conn,body.bot_id,body.group_id)
         if state['enabled']!=body.enabled:
+            follow.close(conn,body.bot_id,body.group_id,'旁听开关变化')
             invalidate(conn,body.bot_id,body.group_id,'旁听开关变更')
             last=conn.execute('SELECT COALESCE(max(id),0) AS id FROM qq_group_message WHERE bot_id=? AND group_id=?',
                               (body.bot_id,body.group_id)).fetchone()['id']
@@ -74,7 +77,10 @@ def bot_message(body):
         conn.execute('''INSERT INTO qq_group_message(bot_id,group_id,message_id,user_id,content,plain_text,sent_at,is_bot)
             VALUES(?,?,?,?,?,?,unixepoch(),true) ON CONFLICT DO NOTHING''',
             (body.bot_id,body.group_id,body.message_id,body.bot_id,body.message,body.message))
-    return {'ok':True}
+        if getattr(body,'opens_window',False):
+            follow.open_window(conn,body)
+        window=follow.window(conn,body.bot_id,body.group_id)
+    return {'ok':True,'window_version':window['version']}
 
 
 def rows(bot, group, *, after=0, limit=50, users_only=False):
@@ -105,7 +111,7 @@ def state(bot, group):
 def quota(conn, bot, group):
     # uncertain 与失败尝试也占冷却，防止网络抖动造成刷屏；发送许可不重试。
     active=conn.execute('SELECT direct_inflight FROM qq_group_state WHERE bot_id=? AND group_id=?',(bot,group)).fetchone()
-    if active and active['direct_inflight']:
+    if (active and active['direct_inflight']) or follow.active(conn,bot,group):
         return False
     row=conn.execute('''SELECT count(*) AS n, max(attempted_at) AS last FROM qq_group_candidate
         WHERE bot_id=? AND group_id=? AND attempted_at>unixepoch()-3600 ''',(bot,group)).fetchone()
@@ -123,6 +129,7 @@ def begin_batch(bot, group):
         if len(batch)<50:
             conn.execute("UPDATE qq_group_state SET stage='idle' WHERE bot_id=? AND group_id=?",(bot,group))
             return None
+        current['suppress_speak']=bool(current['direct_inflight'] or follow.active(conn,bot,group))
         identifier=uuid4()
         conn.execute('''INSERT INTO qq_group_batch(id,bot_id,group_id,first_id,last_id,source_ids)
             VALUES(?,?,?,?,?,?) ON CONFLICT(bot_id,group_id,last_id)
@@ -148,7 +155,7 @@ def finish_batch(old, batch, identifier, decision, coverage):
                          (batch[-1]['id'],decision['summary'],old['bot_id'],old['group_id']))
             import summary_service
             summary_service.archive(conn,f"group:{old['bot_id']}:{old['group_id']}",batch,decision,coverage)
-        return valid and alive and decision['speak'] and quota(conn,old['bot_id'],old['group_id'])
+        return valid and alive and not old.get('suppress_speak',False) and decision['speak'] and quota(conn,old['bot_id'],old['group_id'])
 
 
 def save_candidate(old, batch, identifier, reply, quote):
@@ -217,18 +224,20 @@ def receipt(body):
 
 def startup(bot):
     with storage.connect(write=True) as conn:
+        follow.restart(conn,bot)
         conn.execute('UPDATE qq_group_state SET generation=generation+1 WHERE bot_id=?',(bot,))
         conn.execute("UPDATE qq_group_candidate SET state=CASE WHEN state='sending' THEN 'uncertain' ELSE 'discarded' END,error='进程重启不补发旧稿' WHERE bot_id=? AND state IN ('pending','reviewing','sending')",(bot,))
     return {'ok':True}
 
 
-def direct(bot,group,started):
+def direct(bot,group,started,*,preempt=True):
     if not group:
         return
     with storage.connect(write=True) as conn:
         ensure(conn,bot,group)
-        if started:
+        if started and preempt:
             invalidate(conn,bot,group,'直接互动优先')
+            follow.close(conn,bot,group,'直接互动优先')
         conn.execute('UPDATE qq_group_state SET direct_inflight=max(0,direct_inflight+?) WHERE bot_id=? AND group_id=?',
                      (1 if started else -1,bot,group))
 
@@ -272,6 +281,10 @@ def public_profiles(bot, group, user_ids=None):
 
 def cleanup():
     with storage.connect(write=True) as conn:
+        # 回收失联任务，不按时间关闭用户选择的5条窗口。
+        for job in conn.execute("SELECT message_row_id FROM qq_followup_job WHERE state IN ('pending','processing','prepared') AND created_at<unixepoch()-600").fetchall():
+            follow.settle(conn,job['message_row_id'],'discarded','任务中断，不补发')
+        conn.execute("UPDATE qq_followup_job SET draft=NULL,reason='' WHERE created_at<unixepoch()-604800")
         # 留下不含原文的去重编号与指纹；未达门槛的材料也不能无限保存。
         conn.execute("UPDATE qq_group_message SET content=NULL,plain_text=NULL,profile_eligible=false,nickname='' WHERE received_at<unixepoch()-604800 AND content IS NOT NULL")
         conn.execute("UPDATE qq_group_candidate SET reply='',state=CASE WHEN state IN ('pending','reviewing') THEN 'discarded' ELSE state END WHERE created_at<unixepoch()-604800 AND reply<>''")
@@ -282,6 +295,7 @@ def recall(body):
     changed=set()
     with storage.connect(write=True) as conn:
         ensure(conn,body.bot_id,body.group_id)
+        follow.recall(conn,body)
         row=conn.execute('''UPDATE qq_group_message SET recalled=true,content=NULL,plain_text=NULL,profile_eligible=false
             WHERE bot_id=? AND group_id=? AND message_id=? RETURNING id''',(body.bot_id,body.group_id,body.message_id)).fetchone()
         invalidate(conn,body.bot_id,body.group_id,'群消息已撤回')

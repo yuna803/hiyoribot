@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+from typing import Literal
 from threading import BoundedSemaphore
 
 from fastapi import HTTPException
@@ -29,6 +30,7 @@ class QQChatRequest(BaseModel):
     message_id: str = Field(min_length=1, max_length=80)
     nickname: str = Field(default="", max_length=80)
     message: str = Field(min_length=1, max_length=4000)
+    trigger_reason:Literal['direct','name','followup']='direct'
 
     @field_validator("message_id")
     @classmethod
@@ -63,21 +65,39 @@ def _conversation(body):
     return result
 
 
-def chat(body,config,execute_chat):
+def save_reply(c,body,conversation_id,result):
+    """即时回复和已获发送许可的跟聊共用同一问答提交逻辑。"""
+    portrait=result['recalled_context'].get('profile',{})
+    response=dict(reply=result['reply'],conversation_id=conversation_id,
+        profile_revision=portrait.get('revision',0),affinity=portrait.get('affinity',50))
+    recalled={**result['recalled_context'],'trigger_reason':body.trigger_reason}
+    uid=c.execute("INSERT INTO message(conversation_id,role,content) VALUES(?,'user',?)",(conversation_id,body.message)).lastrowid
+    aid=c.execute("INSERT INTO message(conversation_id,role,content,agent_messages,recalled_context) VALUES(?,'assistant',?,?,?)",
+        (conversation_id,result['reply'],storage.json_dump(result['agent_messages']),storage.json_dump(recalled))).lastrowid
+    c.execute('INSERT INTO completed_turn(conversation_id,user_message_id,assistant_message_id,subject_key) VALUES(?,?,?,?)',
+        (conversation_id,uid,aid,user_scope.subject()))
+    c.execute('UPDATE conversation SET updated_at=unixepoch() WHERE id=?',(conversation_id,))
+    c.execute("UPDATE qq_request SET state='completed',response=? WHERE bot_id=? AND message_id=?",
+        (storage.json_dump(response),body.bot_id,body.message_id))
+    return response
+
+
+def chat(body,config,execute_chat,*,defer=None):
     if body.bot_id!=config.qq_bot_id or body.user_id==body.bot_id:
         raise HTTPException(403,'机器人或用户身份不匹配')
     if not _capacity.acquire(blocking=False):
         raise HTTPException(429,'当前请求较多')
     entered=False
     try:
-        group_storage.direct(body.bot_id,body.group_id,True)
+        group_storage.direct(body.bot_id,body.group_id,True,preempt=defer is None)
         entered=True
-        with user_scope.activate('qq:'+body.user_id),storage.subject_lock('qq-chat:'+body.user_id) as acquired:
+        lock_key='qq-chat:'+body.user_id if defer is None else f'followup-chat:{body.bot_id}:{body.group_id}'
+        with user_scope.activate('qq:'+body.user_id),storage.subject_lock(lock_key) as acquired:
             if not acquired:
                 raise HTTPException(429,'该用户上一条消息仍在处理')
             scoped=user_scope.config_for(config).model_copy(update={'qq_group_id':body.group_id or '',
                 'qq_nickname':body.nickname,'qq_message_id':body.message_id})
-            payload=body.model_dump(exclude={'message_id','nickname'})
+            payload=body.model_dump(exclude={'message_id','nickname','trigger_reason'})
             fingerprint=hashlib.sha256(storage.json_dump(payload).encode()).hexdigest()
             with storage.connect(write=True) as c:
                 old=c.execute('SELECT * FROM qq_request WHERE bot_id=? AND message_id=?',(body.bot_id,body.message_id)).fetchone()
@@ -93,24 +113,20 @@ def chat(body,config,execute_chat):
                 profile_service.snapshot(scoped)
                 conversation=_conversation(body)
                 result=execute_chat({'message':body.message,'conversation_id':conversation['id']},scoped)
-                portrait=result['recalled_context'].get('profile',{})
-                response=dict(reply=result['reply'],conversation_id=conversation['id'],
-                    profile_revision=portrait.get('revision',0),affinity=portrait.get('affinity',50))
-                # 问答保存和请求完成在同一SQLite事务，不能重启后多写一轮。
                 with storage.connect(write=True) as c:
-                    uid=c.execute("INSERT INTO message(conversation_id,role,content) VALUES(?,'user',?)",(conversation['id'],body.message)).lastrowid
-                    aid=c.execute("INSERT INTO message(conversation_id,role,content,agent_messages,recalled_context) VALUES(?,'assistant',?,?,?)",
-                        (conversation['id'],result['reply'],storage.json_dump(result['agent_messages']),storage.json_dump(result['recalled_context']))).lastrowid
-                    c.execute('INSERT INTO completed_turn(conversation_id,user_message_id,assistant_message_id,subject_key) VALUES(?,?,?,?)',
-                        (conversation['id'],uid,aid,user_scope.subject()))
-                    c.execute('UPDATE conversation SET updated_at=unixepoch() WHERE id=?',(conversation['id'],))
-                    c.execute("UPDATE qq_request SET state='completed',response=? WHERE bot_id=? AND message_id=?",
-                        (storage.json_dump(response),body.bot_id,body.message_id))
+                    if defer is not None:
+                        # 跟聊草稿尚未获发送许可，不计完整问答或更新画像。
+                        defer(c,body,conversation['id'],result)
+                        c.execute("UPDATE qq_request SET state='prepared',response=NULL WHERE bot_id=? AND message_id=?",(body.bot_id,body.message_id))
+                        response={'reply':result['reply']}
+                    else:
+                        response=save_reply(c,body,conversation['id'],result)
             except Exception:
                 with storage.connect(write=True) as c:
                     c.execute("UPDATE qq_request SET state='failed' WHERE bot_id=? AND message_id=?",(body.bot_id,body.message_id))
                 raise
-            profile_service.schedule_safely(scoped)
+            if defer is None:
+                profile_service.schedule_safely(scoped)
             if not body.group_id:
                 summary_service.schedule(conversation['id'],scoped)
             return response

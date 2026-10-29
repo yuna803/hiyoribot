@@ -52,7 +52,8 @@ class Recall(GroupKey):
 
 class BotMessage(Recall):
     message:str=Field(max_length=12000)
-
+    opens_window:bool=False
+    segment_message_ids:list[str]=Field(default_factory=list,max_length=6)
 
 class BotKey(BaseModel):
     model_config=ConfigDict(extra='forbid')
@@ -188,7 +189,12 @@ def schedule(bot,group,config):
 
 def ingest(body,config):
     check_bot(body.bot_id,config)
+    from followup_storage import name_matches
+    named=not body.direct and name_matches(body.text,getattr(config,'qq_name_trigger_patterns',['妃爱']))
+    if named:
+        body=body.model_copy(update={'direct':True})
     result=store.ingest(body)
+    result['trigger_reason']='name' if named else ('direct' if body.direct else None)
     if result['accepted'] and result['enabled'] and result['pending']>=50:
         schedule(body.bot_id,body.group_id,config)
     return result
@@ -238,6 +244,9 @@ def tick(config,*,restart=False):
             AND (s.stage<>'failed' OR ?)
             AND (EXISTS(SELECT 1 FROM qq_group_message m WHERE m.bot_id=s.bot_id AND m.group_id=s.group_id
                 AND m.id>s.through_id AND m.content IS NOT NULL AND NOT m.is_bot AND NOT m.recalled)
+                OR EXISTS(SELECT 1 FROM qq_group_message m JOIN qq_passive_profile p USING(bot_id,user_id)
+                    WHERE m.bot_id=s.bot_id AND m.group_id=s.group_id AND m.id<=s.through_id
+                    AND m.id>p.through_id AND m.profile_eligible AND NOT m.recalled)
                 OR (? AND EXISTS(SELECT 1 FROM qq_passive_profile p WHERE p.bot_id=s.bot_id AND p.stage='failed')))''',(bot,restart,restart)).fetchall()
     for group in groups:
         schedule(bot,group['group_id'],config)

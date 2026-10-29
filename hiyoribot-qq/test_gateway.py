@@ -2,6 +2,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,123 @@ nonebot.init(log_level="WARNING")
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegment, PrivateMessageEvent
 from nonebot.adapters.onebot.v11.bot import _check_at_me
 import hiyori_chat as gateway
+
+
+class FollowupGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        gateway.state_path=Path(self.tmp.name)/'state.sqlite'
+        gateway.followup_queues.clear()
+        gateway.followup_tasks.clear()
+        gateway.group_versions.clear()
+        self.calls=[]
+        self.bot=SimpleNamespace(self_id='99',send=AsyncMock(return_value={'message_id':1001}),
+            get_group_member_info=AsyncMock(return_value={'shut_up_timestamp':0}))
+        self.reply='一条正常角色回复'
+
+        async def api(method,path,*,payload=None,**kw):
+            self.calls.append((path,payload))
+            if path=='group/followup' and payload.get('action') in (None,'claim'):
+                return {'send':True,'reply':self.reply}
+            return {}
+        self.patches=[patch.object(gateway,'api',side_effect=api),patch.object(gateway,'get_bots',return_value={'99':self.bot})]
+        for p in self.patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    async def asyncTearDown(self):
+        tasks=list(gateway.followup_tasks.values())
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks,return_exceptions=True)
+        gateway.followup_queues.clear()
+        gateway.followup_tasks.clear()
+
+    async def worker(self):
+        q=asyncio.Queue()
+        q.put_nowait((event(group=True),3))
+        await gateway.followup_worker(self.bot,('99','123'),q)
+
+    async def test_name_route_uses_backend_and_no_at_required(self):
+        async def api(method,path,*,payload=None,**kw):
+            self.calls.append((path,payload))
+            if path=='group/ingest':
+                return {'accepted':True,'trigger_reason':'name'}
+            return {}
+        response=SimpleNamespace(status_code=200,raise_for_status=lambda:None,json=lambda:{'reply':'你好'})
+        client=AsyncMock()
+        client.__aenter__.return_value=client
+        client.post.return_value=response
+        gateway.backend_token='test'
+        with patch.object(gateway,'api',side_effect=api),patch.object(gateway.httpx,'AsyncClient',return_value=client):
+            await gateway.process_message(self.bot,event(group=True,segments=[MessageSegment.text('妃爱你好')]))
+        self.assertEqual(client.post.call_args.kwargs['json']['trigger_reason'],'name')
+        self.assertEqual(self.bot.send.await_count,1)
+        self.assertEqual(sum(p.get('opens_window',False) for path,p in self.calls if path=='group/bot-message'),1)
+
+    async def test_multisegment_reply_opens_once_only_after_all_acks(self):
+        self.bot.send.side_effect=[{'message_id':1001},{'message_id':1002}]
+        self.assertTrue(await gateway.send_chat_reply(self.bot,event(group=True),'文'*2100))
+        opened=[p for path,p in self.calls if path=='group/bot-message' and p.get('opens_window')]
+        self.assertEqual(len(opened),1)
+        self.assertEqual(opened[0]['segment_message_ids'],['1001','1002'])
+        self.calls.clear()
+        self.bot.send.side_effect=[{'message_id':1003},RuntimeError('发送失败')]
+        with self.assertRaises(RuntimeError):
+            await gateway.send_chat_reply(self.bot,event(group=True),'文'*2100)
+        self.assertFalse(any(p.get('opens_window') for path,p in self.calls if path=='group/bot-message'))
+        self.calls.clear()
+        self.bot.send.side_effect=None
+        self.bot.send.return_value={}
+        self.assertFalse(await gateway.send_chat_reply(self.bot,event(group=True),'回复无编号'))
+        self.assertFalse(any(p.get('opens_window') for path,p in self.calls if path=='group/bot-message'))
+
+    async def test_followup_claim_send_receipt_and_management_exclusion(self):
+        await self.worker()
+        actions=[p.get('action','prepare') for path,p in self.calls if path=='group/followup']
+        self.assertEqual(actions,['prepare','claim','receipt'])
+        self.assertEqual(self.calls[-1][1]['state'],'sent')
+        self.calls.clear()
+        await gateway.send_reply(self.bot,event(group=True),'旁听已开启。')
+        self.assertFalse(any(p.get('opens_window') for path,p in self.calls))
+
+    async def test_muted_offline_and_uncertain_never_send_error_message(self):
+        self.bot.get_group_member_info.return_value={'shut_up_timestamp':int(time.time())+60}
+        await self.worker()
+        self.bot.send.assert_not_awaited()
+        self.assertEqual(self.calls[-1][1]['action'],'discard')
+        self.calls.clear()
+        self.bot.get_group_member_info.return_value={'shut_up_timestamp':0}
+        with patch.object(gateway,'get_bots',return_value={}):
+            await self.worker()
+        self.bot.send.assert_not_awaited()
+        with patch.object(gateway,'send_chat_reply',side_effect=asyncio.TimeoutError):
+            await self.worker()
+        self.assertEqual(self.calls[-1][1]['state'],'uncertain')
+        self.bot.send.assert_not_awaited()
+
+    async def test_new_event_during_claim_discards_send(self):
+        async def api(method,path,*,payload=None,**kw):
+            self.calls.append((path,payload))
+            if payload.get('action')=='claim':
+                gateway.bump_group('99','123')
+            return {'send':True,'reply':'旧回复'}
+        with patch.object(gateway,'api',side_effect=api):
+            await self.worker()
+        self.bot.send.assert_not_awaited()
+        self.assertEqual(self.calls[-1][1]['action'],'receipt')
+        self.assertEqual(self.calls[-1][1]['state'],'failed')
+
+    async def test_open_receipt_keeps_already_arrived_new_window_messages(self):
+        key=('99','123')
+        q=gateway.followup_queues[key]=asyncio.Queue(maxsize=5)
+        q.put_nowait((event(1,group=True),2))
+        q.put_nowait((event(2,group=True),3))
+        gateway.clear_followup_queue(*key,version=3)
+        self.assertEqual(q.qsize(),1)
+        self.assertEqual(q.get_nowait()[1],3)
 
 
 def event(message_id=1, user_id=7, group=False, segments=None):
