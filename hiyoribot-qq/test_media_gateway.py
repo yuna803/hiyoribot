@@ -67,6 +67,8 @@ class MediaGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(base64.b64decode(calls[1]['data']),b'picture')
         self.assertFalse(calls[1]['manual'])
         self.assertEqual(qq_media.picture_segments(event(segments=[MessageSegment.text('https://qpic.cn/a')]).original_message),[])
+        text_quote=SimpleNamespace(original_message=[MessageSegment.reply(42)],reply=SimpleNamespace(message=[MessageSegment.text('纯文字引用')]))
+        self.assertFalse(qq_media.has_images(text_quote))
 
     async def test_download_refresh_failure_and_safe_source_urls(self):
         self.assertFalse(qq_media.permitted_url('http://127.0.0.1/secret'))

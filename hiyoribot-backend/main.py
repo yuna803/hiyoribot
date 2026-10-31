@@ -50,7 +50,7 @@ class AppConfig(BaseModel):
     media_enabled:bool=True
     media_home:str|None=None
     vision_model:str=''
-    vision_daily_limit:int=Field(default=100,ge=1,le=10000)
+    vision_daily_limit:int=Field(default=100,ge=1,le=100)
     media_wait_seconds:float=Field(default=8,ge=0,le=8,exclude=True)
     qq_has_images:bool=Field(default=False,exclude=True)
 
@@ -134,7 +134,7 @@ async def lifespan(app):
             except asyncio.CancelledError:
                 pass
 
-app=FastAPI(title='HiyoriBot flash QQ',version='flash.1',lifespan=lifespan)
+app=FastAPI(title='HiyoriBot flash QQ',version='flash.4',lifespan=lifespan)
 
 @app.exception_handler(sqlite3.Error)
 async def database_error(request,error):

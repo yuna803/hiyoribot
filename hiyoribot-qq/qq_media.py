@@ -18,9 +18,12 @@ def picture_segments(message):
 
 def has_images(event):
     reply=getattr(event,'reply',None)
-    return bool(picture_segments(event.original_message) or
-                (reply and picture_segments(getattr(reply,'message',[]))) or
-                any(s.type=='reply' for s in event.original_message))
+    if picture_segments(event.original_message):
+        return True
+    if reply is not None:
+        return bool(picture_segments(getattr(reply,'message',[])))
+    # 适配器尚未解析引用时，后台get_msg再确认；已解析的纯文字引用不等待识图。
+    return any(s.type=='reply' for s in event.original_message)
 
 
 def key(bot,event):

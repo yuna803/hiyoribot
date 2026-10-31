@@ -33,6 +33,11 @@ def main_cli():
         config=config.model_copy(update={'sqlite_path':str(database),'media_home':str(Path(folder)/'media')})
         storage.configure(database)
         storage.init_db()
+        if report.is_file():
+            prior=json.loads(report.read_text(encoding='utf8'))
+            with storage.connect(write=True) as c:
+                for q in prior.get('quota',[]):
+                    c.execute('INSERT INTO media_daily(day,attempts) VALUES(?,?)',(q['day'],q['attempts']))
         still=Image.new('RGB',(240,160),'skyblue')
         ImageDraw.Draw(still).text((25,60),'HIYORI',fill='black',font_size=26)
         tests=[]
