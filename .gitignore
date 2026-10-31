@@ -39,3 +39,6 @@ profile.md
 *.sqlite-*
 *.process.lock
 qq.env
+# 识图缓存与图库只放仓库外；防止误落到仓库的运行目录。
+media/
+meme_library/

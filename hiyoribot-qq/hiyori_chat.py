@@ -7,6 +7,8 @@ from contextlib import closing
 from pathlib import Path
 
 import httpx
+import base64
+import qq_media
 from nonebot import get_bots, get_driver, on_message, on_notice
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, GroupRecallNoticeEvent, MessageEvent, MessageSegment, PrivateMessageEvent
 from nonebot.log import logger
@@ -74,7 +76,7 @@ def make_payload(event: MessageEvent, bot_id: str, *, force=False, trigger_reaso
     if isinstance(event, GroupMessageEvent) and not force and not is_direct(event, bot_id):
         return None
     message = "".join(str(s.data.get("text", "")) for s in event.original_message if s.type == "text").strip()
-    if not message and isinstance(event, GroupMessageEvent):
+    if not message:
         message = "".join(f"[{s.type}]" for s in event.original_message if s.type not in ("text", "at", "reply"))
     if not message:
         return None
@@ -127,23 +129,58 @@ async def send_reply(bot, event, text):
         await register_sent(str(bot.self_id), str(event.group_id), ack, text)
 
 
-async def send_chat_reply(bot,event,text):
-    """分段全部成功且都有编号后才把整段角色回复登记为新窗口。"""
+async def send_chat_reply(bot,event,text,attachments=None,delivery_id='',*,group_id=None,sender=None):
+    """所有分段都取得回执才续一次窗口；失败和不确定均不重发。"""
     ids=[]
+    attachments=attachments or []
+    if len(attachments)>1:
+        raise ValueError('一次回复最多一张表情')
+    group_id=str(group_id or (event.group_id if isinstance(event,GroupMessageEvent) else ''))
+    scope={**qq_media.scope(bot,event),'group_id':group_id}
+    send=sender or (lambda message:bot.send(event,message))
     complete=True
-    for start in range(0,len(text),2000):
-        part=text[start:start+2000]
-        ack=await bot.send(event,MessageSegment.text(part))
-        mid=message_id_from_ack(ack)
-        complete=complete and mid is not None
-        if mid is not None:
-            ids.append(mid)
-        if isinstance(event,GroupMessageEvent):
-            await register_sent(str(bot.self_id),str(event.group_id),ack,part)
-    if complete and ids and isinstance(event,GroupMessageEvent):
-        await register_sent(str(bot.self_id),str(event.group_id),{'message_id':ids[-1]},text,
+    media_state='failed'
+    media_id=None
+    logical=text
+    try:
+        for start in range(0,len(text),2000):
+            part=text[start:start+2000]
+            ack=await send(MessageSegment.text(part))
+            mid=message_id_from_ack(ack)
+            complete=complete and mid is not None
+            if mid is not None:
+                ids.append(mid)
+            if group_id:
+                await register_sent(str(bot.self_id),group_id,ack,part)
+        if attachments:
+            raw=await qq_media.get_file(backend_url,backend_token,attachments[0]['asset_id'],
+                                       {**scope,'delivery_id':delivery_id})
+            media_state='uncertain'  # 请求一旦发出，超时/断线不能认定未发送。
+            ack=await asyncio.wait_for(send(MessageSegment.image('base64://'+base64.b64encode(raw).decode())),timeout=15)
+            media_id=message_id_from_ack(ack)
+            if media_id is None:
+                raise ValueError('图片回执没有消息编号')
+            media_state='sent';ids.append(media_id)
+            caption='[表情#'+attachments[0]['asset_id'][:12]+'：'+attachments[0]['description'][:300]+']'
+            logical=text+' '+caption
+            if group_id:
+                await register_sent(str(bot.self_id),group_id,ack,caption)
+    except Exception:
+        complete=False
+        if not attachments:
+            raise
+        logger.warning('QQ图文回复未完整发送，不自动重发')
+    finally:
+        if attachments:
+            try:
+                await api('POST','media/receipt',payload={**scope,'delivery_id':delivery_id,
+                    'state':media_state,'message_id':media_id})
+            except Exception:
+                logger.warning('QQ表情回执同步失败')
+    if complete and ids and group_id:
+        await register_sent(str(bot.self_id),group_id,{'message_id':ids[-1]},logical,
                             opens_window=True,segment_message_ids=ids,reply_to_message_id=str(event.message_id))
-    return complete
+    return complete and bool(ids)
 
 
 def clear_followup_queue(bot_id,group_id,*,version=None):
@@ -173,7 +210,9 @@ async def followup_worker(bot,key,queue):
     try:
         while not queue.empty():
             event,version=queue.get_nowait()
-            payload={'bot_id':bot_id,'group_id':group_id,'message_id':str(event.message_id),'window_version':version}
+            remaining=await qq_media.wait(bot,event)
+            payload={'bot_id':bot_id,'group_id':group_id,'message_id':str(event.message_id),'window_version':version,
+                     'media_wait_seconds':remaining,'has_images':qq_media.has_images(event)}
             claimed=False
             state='failed'
             try:
@@ -188,10 +227,13 @@ async def followup_worker(bot,key,queue):
                 if not claimed or group_versions.get(key,0)!=local_version:
                     continue
                 reply=permitted.get('reply')
-                if not isinstance(reply,str) or not reply.strip() or len(reply)>12000:
+                if not isinstance(reply,str) or (not reply.strip() and not permitted.get('attachments')) or len(reply)>12000:
                     continue
                 try:
-                    complete=await asyncio.wait_for(send_chat_reply(bot,event,reply),timeout=15)
+                    if permitted.get('attachments'):
+                        complete=await asyncio.wait_for(send_chat_reply(bot,event,reply,permitted['attachments'],permitted['delivery_id']),timeout=30)
+                    else:
+                        complete=await asyncio.wait_for(send_chat_reply(bot,event,reply),timeout=15)
                     state='sent' if complete else 'uncertain'
                 except (asyncio.TimeoutError,httpx.TimeoutException):
                     state='uncertain'
@@ -232,12 +274,15 @@ def group_payload(event, bot_id, direct):
             "message_id": str(event.message_id), "nickname": (event.sender.card or event.sender.nickname or "")[:80],
             "message": message, "text": text, "quoted_message_id": quote_id(event), "direct": direct,
             'addresses_other':any(s.type=='at' and str(s.data.get('qq'))!=bot_id for s in segments),
+            'has_images':qq_media.has_images(event),
             "sent_at": int(event.time)}
 
 
 async def process_message(bot: Bot, event: MessageEvent):
     bot_id = str(bot.self_id)
     if str(event.user_id) == bot_id:
+        return
+    if await qq_media.management(bot,event,api,backend_url,backend_token):
         return
     route={}
     if isinstance(event, GroupMessageEvent):
@@ -256,15 +301,22 @@ async def process_message(bot: Bot, event: MessageEvent):
             route=await api("POST", "group/ingest", payload=group_payload(event, bot_id, direct))
         except Exception:
             logger.warning("QQ群消息采集失败")
+        if route.get('enabled') or direct or route.get('trigger_reason')=='name':
+            qq_media.start(bot,event,api)
         if direct or route.get('trigger_reason') in ('direct','name'):
             clear_followup_queue(bot_id,str(event.group_id))
         elif route.get('accepted') and route.get('followup'):
             await queue_followup(bot,event,route['window_version'])
             return
+    if isinstance(event,PrivateMessageEvent):
+        qq_media.start(bot,event,api)
     named=route.get('trigger_reason')=='name'
     payload = make_payload(event, bot_id,force=named,trigger_reason='name' if named else 'direct')
     if payload is None:
         return
+    if qq_media.has_images(event):
+        payload['media_wait_seconds']=await qq_media.wait(bot,event)
+        payload['has_images']=True
     key = (bot_id, payload["user_id"])
     lock = locks.get(key)
     if lock is None:
@@ -285,11 +337,15 @@ async def process_message(bot: Bot, event: MessageEvent):
                     await send_reply(bot, event, "现在有点忙，请稍后重新发送消息。")
                     return
                 response.raise_for_status()
-                reply = response.json().get("reply")
-                if not isinstance(reply, str) or not reply.strip():
+                answer=response.json()
+                reply = answer.get("reply")
+                if not isinstance(reply, str) or (not reply.strip() and not answer.get('attachments')):
                     raise ValueError("invalid reply")
             reply = reply[:12000]
-            await send_chat_reply(bot,event,reply)
+            if answer.get('attachments'):
+                await send_chat_reply(bot,event,reply,answer['attachments'],answer['delivery_id'])
+            else:
+                await send_chat_reply(bot,event,reply)
         except Exception:
             logger.warning("QQ 消息处理失败，请检查网关及后端状态")
             try:
@@ -308,23 +364,39 @@ async def send_candidate(bot, candidate_id, group_id):
             return
         target = str(result.get("group_id", ""))
         reply = result.get("reply")
-        if target != group_id or not isinstance(reply, str) or not reply.strip():
+        if target != group_id or not isinstance(reply,str) or (not reply.strip() and not result.get('attachments')):
             raise ValueError("invalid candidate")
         if not await can_send_group(bot,bot_id,group_id):
             raise RuntimeError('bot offline, muted or mute status unavailable')
         if group_versions.get((bot_id, group_id), 0) != version:
             raise RuntimeError("group changed after claim")
-        message = MessageSegment.text(reply)
-        if result.get("quote_message_id") is not None:
-            message = MessageSegment.reply(int(result["quote_message_id"])) + message
-        try:
-            ack = await asyncio.wait_for(bot.send_group_msg(group_id=int(group_id), message=message), timeout=15)
-        except (asyncio.TimeoutError, httpx.TimeoutException):
-            state = "uncertain"
-            return
-        state = "sent"
-        message_id = message_id_from_ack(ack)
-        await register_sent(bot_id, group_id, ack, reply,opens_window=True,reply_to_message_id=result.get('quote_message_id'))
+        if result.get('attachments'):
+            from types import SimpleNamespace
+            event=SimpleNamespace(user_id=bot_id,group_id=group_id,message_id=result.get('quote_message_id') or '0')
+            first=True
+            async def sender(message):
+                nonlocal first
+                if first and result.get('quote_message_id') is not None:
+                    message=MessageSegment.reply(int(result['quote_message_id']))+message
+                first=False
+                return await bot.send_group_msg(group_id=int(group_id),message=message)
+            complete=await send_chat_reply(bot,event,reply,result['attachments'],result['delivery_id'],
+                                           group_id=group_id,sender=sender)
+            state='sent' if complete else 'uncertain'
+        else:
+            message=MessageSegment.text(reply)
+            if result.get('quote_message_id') is not None:
+                message=MessageSegment.reply(int(result['quote_message_id']))+message
+            try:
+                ack=await asyncio.wait_for(bot.send_group_msg(group_id=int(group_id),message=message),timeout=15)
+            except (asyncio.TimeoutError,httpx.TimeoutException):
+                state='uncertain'
+                return
+            message_id=message_id_from_ack(ack)
+            state='sent' if message_id is not None else 'uncertain'
+            if message_id is not None:
+                await register_sent(bot_id,group_id,ack,reply,opens_window=True,reply_to_message_id=result.get('quote_message_id'))
+
     except Exception:
         logger.warning("QQ群候选消息发送失败")
     finally:
@@ -382,6 +454,7 @@ async def connected(bot: Bot):
 async def disconnected(bot: Bot):
     bot_id=str(bot.self_id)
     started_bots.discard(bot_id)
+    await qq_media.disconnect(bot_id)
     task = poll_tasks.pop(str(bot.self_id), None)
     if task is not None:
         task.cancel()

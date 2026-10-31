@@ -16,6 +16,7 @@ import user_scope
 import profile_service
 import summary_service
 import group_storage
+import media_service
 
 # ponytail: 本机最多同时处理4个QQ模型请求；需要扩容时再改有界任务队列。
 _capacity = BoundedSemaphore(4)
@@ -31,6 +32,8 @@ class QQChatRequest(BaseModel):
     nickname: str = Field(default="", max_length=80)
     message: str = Field(min_length=1, max_length=4000)
     trigger_reason:Literal['direct','name','followup']='direct'
+    media_wait_seconds:float=Field(default=8,ge=0,le=8)
+    has_images:bool=False
 
     @field_validator("message_id")
     @classmethod
@@ -70,10 +73,17 @@ def save_reply(c,body,conversation_id,result):
     portrait=result['recalled_context'].get('profile',{})
     response=dict(reply=result['reply'],conversation_id=conversation_id,
         profile_revision=portrait.get('revision',0),affinity=portrait.get('affinity',50))
+    attachments=result.get('attachments',[])
+    delivery_id=f'qq:{body.bot_id}:{body.message_id}'
+    if attachments:
+        response.update(attachments=attachments,delivery_id=delivery_id)
+        media_service.register_delivery(c,delivery_id,body.bot_id,body.user_id,body.group_id,attachments)
     recalled={**result['recalled_context'],'trigger_reason':body.trigger_reason}
     uid=c.execute("INSERT INTO message(conversation_id,role,content) VALUES(?,'user',?)",(conversation_id,body.message)).lastrowid
     aid=c.execute("INSERT INTO message(conversation_id,role,content,agent_messages,recalled_context) VALUES(?,'assistant',?,?,?)",
-        (conversation_id,result['reply'],storage.json_dump(result['agent_messages']),storage.json_dump(recalled))).lastrowid
+        (conversation_id,media_service.record_text(result['reply'],attachments),storage.json_dump(result['agent_messages']),storage.json_dump(recalled))).lastrowid
+    c.execute('INSERT INTO media_turn_link(message_row_id,bot_id,user_id,group_id,external_message_id) VALUES(?,?,?,?,?)',
+              (uid,body.bot_id,body.user_id,body.group_id or '',body.message_id))
     c.execute('INSERT INTO completed_turn(conversation_id,user_message_id,assistant_message_id,subject_key) VALUES(?,?,?,?)',
         (conversation_id,uid,aid,user_scope.subject()))
     c.execute('UPDATE conversation SET updated_at=unixepoch() WHERE id=?',(conversation_id,))
@@ -96,8 +106,8 @@ def chat(body,config,execute_chat,*,defer=None):
             if not acquired:
                 raise HTTPException(429,'该用户上一条消息仍在处理')
             scoped=user_scope.config_for(config).model_copy(update={'qq_group_id':body.group_id or '',
-                'qq_nickname':body.nickname,'qq_message_id':body.message_id})
-            payload=body.model_dump(exclude={'message_id','nickname','trigger_reason'})
+                'qq_nickname':body.nickname,'qq_message_id':body.message_id,'media_wait_seconds':body.media_wait_seconds,'qq_has_images':body.has_images})
+            payload=body.model_dump(exclude={'message_id','nickname','trigger_reason','media_wait_seconds','has_images'})
             fingerprint=hashlib.sha256(storage.json_dump(payload).encode()).hexdigest()
             with storage.connect(write=True) as c:
                 old=c.execute('SELECT * FROM qq_request WHERE bot_id=? AND message_id=?',(body.bot_id,body.message_id)).fetchone()
@@ -118,7 +128,7 @@ def chat(body,config,execute_chat,*,defer=None):
                         # 跟聊草稿尚未获发送许可，不计完整问答或更新画像。
                         defer(c,body,conversation['id'],result)
                         c.execute("UPDATE qq_request SET state='prepared',response=NULL WHERE bot_id=? AND message_id=?",(body.bot_id,body.message_id))
-                        response={'reply':result['reply']}
+                        response={'reply':result['reply'],'attachments':result.get('attachments',[])}
                     else:
                         response=save_reply(c,body,conversation['id'],result)
             except Exception:

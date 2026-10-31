@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal
 import yaml
 from fastapi import FastAPI,Header,HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse,FileResponse
 from openai import OpenAIError
 from pydantic import BaseModel,ConfigDict,Field,field_validator
 import agent_service
@@ -22,6 +22,7 @@ import qq_service
 import storage
 import summary_service
 import user_scope
+import media_service
 
 HOME=Path.home()/'.local/share/hiyoribot/flash'
 class AppConfig(BaseModel):
@@ -46,6 +47,12 @@ class AppConfig(BaseModel):
     qq_nickname:str=Field(default='',exclude=True)
     qq_group_id:str=Field(default='',exclude=True)
     qq_message_id:str=Field(default='',exclude=True)
+    media_enabled:bool=True
+    media_home:str|None=None
+    vision_model:str=''
+    vision_daily_limit:int=Field(default=100,ge=1,le=10000)
+    media_wait_seconds:float=Field(default=8,ge=0,le=8,exclude=True)
+    qq_has_images:bool=Field(default=False,exclude=True)
 
     @field_validator('qq_name_trigger_patterns')
     @classmethod
@@ -58,9 +65,11 @@ class AppConfig(BaseModel):
                 raise ValueError('名字正则格式无效') from error
         return patterns
 
-    @field_validator('sqlite_path','profile_home','qq_profile_home')
+    @field_validator('sqlite_path','profile_home','qq_profile_home','media_home')
     @classmethod
     def private_path(cls,value):
+        if value is None:
+            return None
         p=Path(value).expanduser()
         if not p.is_absolute() or p.resolve().is_relative_to(storage.ROOT):
             raise ValueError('运行数据必须使用仓库外的绝对路径')
@@ -91,6 +100,8 @@ async def lifespan(app):
     storage.configure(config.sqlite_path)
     with storage.process_guard():
         storage.init_db()
+        if config.media_enabled:
+            media_service.recover(resolve_config())
         group_service.tick(resolve_config() if config.qq_enabled else config,restart=True)
         with storage.connect(write=True) as c:
             c.execute("UPDATE qq_request SET state='failed' WHERE state='running'")
@@ -108,6 +119,9 @@ async def lifespan(app):
                 await asyncio.sleep(60)
                 try:
                     await asyncio.to_thread(group_service.tick,resolve_config())
+                    if config.media_enabled:
+                        await asyncio.to_thread(media_service.cleanup,config)
+                        media_service.kick(resolve_config())
                 except Exception as error:
                     logging.getLogger(__name__).warning('群后台维护失败：%s',type(error).__name__)
         task=asyncio.create_task(maintain())
@@ -130,7 +144,7 @@ async def database_error(request,error):
 def health():
     with storage.connect() as c:
         c.execute('SELECT 1').fetchone()
-    return {'app':'HiyoriBot','version':'flash.3','pid':os.getpid(),'database':True,'storage':'sqlite','provider':'deepseek'}
+    return {'app':'HiyoriBot','version':'flash.4','pid':os.getpid(),'database':True,'storage':'sqlite','provider':'deepseek'}
 
 @app.post('/integrations/qq/chat')
 def qq_chat(body:qq_service.QQChatRequest,authorization:str|None=Header(default=None)):
@@ -203,3 +217,37 @@ def qq_group_receipt(body:group_service.Receipt,authorization:str|None=Header(de
 def qq_group_startup(body:group_service.BotKey,authorization:str|None=Header(default=None)):
     qq_group_config(authorization,body.bot_id)
     return group_service.store.startup(body.bot_id)
+
+
+@app.post('/integrations/qq/media/ingest')
+def media_ingest(body:media_service.Upload,authorization:str|None=Header(default=None)):
+    qq_group_config(authorization,body.bot_id)
+    return media_service.ingest(body,resolve_config())
+
+
+@app.post('/integrations/qq/media/manage')
+def media_manage(body:media_service.Manage,authorization:str|None=Header(default=None)):
+    qq_group_config(authorization,body.bot_id)
+    return media_service.manage(body,resolve_config())
+
+
+@app.get('/integrations/qq/media/status')
+def media_status(bot_id:str,user_id:str,message_id:str,group_id:str='',authorization:str|None=Header(default=None)):
+    qq_group_config(authorization,bot_id)
+    body=media_service.Scope(bot_id=bot_id,user_id=user_id,group_id=group_id)
+    return {'images':media_service.describe(body.bot_id,body.user_id,body.group_id,message_id,expected=True)}
+
+
+@app.post('/integrations/qq/media/receipt')
+def media_receipt(body:media_service.Receipt,authorization:str|None=Header(default=None)):
+    qq_group_config(authorization,body.bot_id)
+    return media_service.receipt(body)
+
+
+@app.get('/integrations/qq/media/file/{asset_id}')
+def media_file(asset_id:str,bot_id:str,user_id:str,group_id:str='',delivery_id:str='',review:bool=False,
+               authorization:str|None=Header(default=None)):
+    config=qq_group_config(authorization,bot_id)
+    body=media_service.Scope(bot_id=bot_id,user_id=user_id,group_id=group_id)
+    path,mime=media_service.file_for(asset_id,body,config,delivery_id=delivery_id,review=review)
+    return FileResponse(path,media_type=mime)

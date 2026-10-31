@@ -404,7 +404,7 @@ class TestGateway(unittest.IsolatedAsyncioTestCase):
             await gateway.process_message(bot, event(132, segments=[MessageSegment.image('x')]))
         self.assertEqual(len(ingested[0]['message']), 32001)
         self.assertEqual(len(ingested[0]['text']), 32001)
-        self.assertEqual([x['message'] for x in self.requests], ['[image]'])
+        self.assertEqual([x['message'] for x in self.requests], ['[image]','[image]'])
 
     async def test_stale_after_claim_and_mute_fallback(self):
         bot = Bot()

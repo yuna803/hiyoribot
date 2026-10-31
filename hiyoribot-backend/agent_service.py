@@ -128,6 +128,7 @@ def run(client, model: str, messages: list[dict], conversation_id: UUID,
     protocol, trace, thoughts, references = [], [], [], []
     stages=list((recalled_context or {}).get('stages',[]))
     cache = {}
+    media_output=[]
     calls_used = 0
     for round_number in range(1, MAX_TOOL_ROUNDS + 2):
         final_only = round_number > MAX_TOOL_ROUNDS or calls_used >= MAX_TOOL_CALLS
@@ -159,13 +160,14 @@ def run(client, model: str, messages: list[dict], conversation_id: UUID,
         stages.append(stage)
         yield 'pipeline_stage',stage
         if not calls:
-            if not message["content"].strip():
+            if not message["content"].strip() and not media_output:
                 raise AgentError("模型回复为空，未保存这轮聊天")
             extra={key:recalled_context[key] for key in ('profile',) if key in (recalled_context or {})}
             context_record={"rounds":references,**extra}
             if stages:
                 context_record['stages']=stages
             yield "complete", {"reply": message["content"], "reasoning": "\n\n".join(thoughts),
+                               'attachments':media_output,
                                "tool_calls": trace, "agent_messages": protocol,
                                "recalled_context": context_record}
             return
@@ -193,7 +195,7 @@ def run(client, model: str, messages: list[dict], conversation_id: UUID,
                 progress_snapshot = ({"story_progress":recalled_context["progress"]}
                                      if recalled_context is not None and "progress" in recalled_context else {})
                 mode=({'knowledge_mode':config.knowledge_mode} if config is not None and hasattr(config,'knowledge_mode') else {})
-                result = agent_tools.execute(name,raw,conversation_id,character_name,**progress_snapshot,**mode)
+                result = agent_tools.execute(name,raw,conversation_id,character_name,config=config,media_output=media_output,**progress_snapshot,**mode)
                 cache[cache_key] = result
             calls_used += 1
             stage={'name':'联网搜索' if name=='search_web' else '文字资料查询' if name.startswith('search_') else '工具执行',

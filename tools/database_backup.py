@@ -2,6 +2,8 @@
 import argparse
 import hashlib
 import json
+import re
+import shutil
 import sqlite3
 import sys
 from contextlib import closing
@@ -46,10 +48,16 @@ def check(path):
     with closing(readonly(path)) as conn:
         if conn.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
             raise ValueError('备份完整性检查失败')
+    for item in manifest.get('media',[]):
+        if not re.fullmatch(r'[a-f0-9]{64}\.(jpg|png|gif|webp)',item['name']):
+            raise ValueError('图库清单文件名无效')
+        media=path.with_suffix('.media')/item['name']
+        if not media.is_file() or media.stat().st_size!=item['bytes'] or checksum(media)!=item['sha256']:
+            raise ValueError('图库文件丢失或校验失败')
     return manifest
 
 
-def backup(database, folder):
+def backup(database, folder, media_home=None):
     database, folder = outside_repo(database), outside_repo(folder)
     if not database.is_file():
         raise ValueError('数据库文件不存在')
@@ -66,6 +74,23 @@ def backup(database, folder):
         partial.replace(target)
         manifest = {'format': 'sqlite', 'created_at': datetime.now(timezone.utc).isoformat(),
                     'bytes': target.stat().st_size, 'sha256': checksum(target)}
+        media_home=outside_repo(media_home or database.parent/'media')
+        manifest['media']=[]
+        with closing(readonly(target)) as conn:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name='media_asset'").fetchone():
+                for identifier,suffix,state in conn.execute("SELECT id,suffix,meme_state FROM media_asset WHERE state<>'expired'"):
+                    name=f'{identifier}.{suffix}'
+                    if not re.fullmatch(r'[a-f0-9]{64}\.(jpg|png|gif|webp)',name):
+                        raise ValueError('图库文件名无效')
+                    source=media_home/name
+                    if not source.is_file():
+                        if state=='approved':
+                            raise ValueError('批准图库文件缺失，不能生成完整备份')
+                        continue
+                    destination=target.with_suffix('.media')/name
+                    destination.parent.mkdir(exist_ok=True)
+                    shutil.copyfile(source,destination)
+                    manifest['media'].append({'name':name,'bytes':destination.stat().st_size,'sha256':checksum(destination)})
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf8')
         check(target)
     except BaseException:
@@ -77,7 +102,7 @@ def backup(database, folder):
     return target
 
 
-def restore(path, database, folder, confirmation):
+def restore(path, database, folder, confirmation,media_home=None):
     path, database = outside_repo(path), outside_repo(database)
     folder = outside_repo(folder)
     if path == database or (path.exists() and database.exists() and path.samefile(database)):
@@ -86,10 +111,15 @@ def restore(path, database, folder, confirmation):
         raise ValueError('--confirm-restore 必须与目标文件名一致')
     if not database.is_file():
         raise ValueError('目标数据库不存在，请先初始化')
-    check(path)
+    manifest=check(path)
+    media_home=outside_repo(media_home or database.parent/'media')
     storage.configure(database)
     with storage.process_guard():
-        safety = backup(database, folder)
+        safety = backup(database, folder,media_home)
+        # 内容哈希命名的文件先恢复；数据库最后替换，不删除目标中的额外安全副本。
+        for item in manifest.get('media',[]):
+            media_home.mkdir(parents=True,exist_ok=True)
+            shutil.copyfile(path.with_suffix('.media')/item['name'],media_home/item['name'])
         with closing(readonly(path)) as source, closing(storage._open_connection()) as target:
             source.backup(target)
     return safety
@@ -102,6 +132,7 @@ def main(argv=None):
     parser.add_argument('--folder', type=Path)
     parser.add_argument('--file', type=Path)
     parser.add_argument('--confirm-restore', default='')
+    parser.add_argument('--media-home',type=Path,help='图库路径；默认数据库同级media目录')
     args = parser.parse_args(argv)
     try:
         if args.action == 'check':
@@ -127,11 +158,11 @@ def main(argv=None):
             if integrity != 'ok':
                 return 1
         elif args.action == 'backup':
-            print(f'备份完成：{backup(database, folder)}')
+            print(f'备份完成：{backup(database, folder,args.media_home)}')
         else:
             if not args.file:
                 raise ValueError('restore 需要 --file')
-            print(f'恢复完成，恢复前备份：{restore(args.file, database, folder, args.confirm_restore)}')
+            print(f'恢复完成，恢复前备份：{restore(args.file, database, folder, args.confirm_restore,args.media_home)}')
         return 0
     except (ValueError, RuntimeError, OSError, sqlite3.Error, KeyError, json.JSONDecodeError):
         # 配置、驱动和路径异常可能包含敏感信息，不输出异常正文。

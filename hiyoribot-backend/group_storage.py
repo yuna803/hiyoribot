@@ -8,6 +8,7 @@ from fastapi import HTTPException
 
 import storage
 import followup_storage as follow
+import media_service
 
 
 def ensure(conn, bot, group):
@@ -158,16 +159,18 @@ def finish_batch(old, batch, identifier, decision, coverage):
         return valid and alive and not old.get('suppress_speak',False) and decision['speak'] and quota(conn,old['bot_id'],old['group_id'])
 
 
-def save_candidate(old, batch, identifier, reply, quote):
+def save_candidate(old, batch, identifier, reply, quote,*,attachments=None):
     with storage.connect(write=True) as conn:
         now=ensure(conn,old['bot_id'],old['group_id'])
         if not now['enabled'] or now['generation']!=old['generation'] or not quota(conn,old['bot_id'],old['group_id']):
             return
         # 保存生成开始时的末条ID，普通新消息将触发发送前复核。
         observed=batch[-1]['id']
-        conn.execute('''INSERT INTO qq_group_candidate(id,batch_id,bot_id,group_id,generation,observed_id,reply,
-            quote_message_id,source_ids) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(batch_id) DO NOTHING''',
-            (uuid4(),identifier,old['bot_id'],old['group_id'],old['generation'],observed,reply,quote,storage.json_dump([r['id'] for r in batch])))
+        inserted=conn.execute('''INSERT INTO qq_group_candidate(id,batch_id,bot_id,group_id,generation,observed_id,reply,
+            quote_message_id,source_ids) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(batch_id) DO NOTHING RETURNING id''',
+            (uuid4(),identifier,old['bot_id'],old['group_id'],old['generation'],observed,reply,quote,storage.json_dump([r['id'] for r in batch]))).fetchone()
+        if inserted:
+            media_service.register_delivery(conn,'candidate:'+inserted['id'],old['bot_id'],old['bot_id'],old['group_id'],attachments or [])
 
 
 def fail(bot, group, error):
@@ -212,7 +215,17 @@ def permit(candidate, observed, approved):
              None if valid else '新消息、直接互动或复核否决',candidate['id'])).fetchone()
         if not row or not valid:
             return {'send':False}
-        return dict(send=True,group_id=candidate['group_id'],reply=candidate['reply'],quote_message_id=candidate['quote_message_id'])
+        delivery_id='candidate:'+candidate['id']
+        # 同一连接内查询，不在持写锁时另开连接。
+        asset=conn.execute("SELECT a.* FROM media_delivery d JOIN media_asset a ON a.id=d.asset_id WHERE d.id=? AND a.meme_state='approved'",(delivery_id,)).fetchone()
+        attachments=[media_service.attachment(asset)] if asset else []
+        if not candidate['reply'].strip() and not attachments:
+            conn.execute("UPDATE qq_group_candidate SET state='discarded',error='表情不可用' WHERE id=?",(candidate['id'],))
+            return {'send':False}
+        result=dict(send=True,group_id=candidate['group_id'],reply=candidate['reply'],quote_message_id=candidate['quote_message_id'])
+        if attachments:
+            result.update(attachments=attachments,delivery_id=delivery_id)
+        return result
 
 
 def receipt(body):
@@ -296,6 +309,8 @@ def recall(body):
     with storage.connect(write=True) as conn:
         ensure(conn,body.bot_id,body.group_id)
         follow.recall(conn,body)
+        conn.execute('DELETE FROM media_source WHERE bot_id=? AND group_id=? AND (message_id=? OR reference_message_id=?)',
+                     (body.bot_id,body.group_id,body.message_id,body.message_id))
         row=conn.execute('''UPDATE qq_group_message SET recalled=true,content=NULL,plain_text=NULL,profile_eligible=false
             WHERE bot_id=? AND group_id=? AND message_id=? RETURNING id''',(body.bot_id,body.group_id,body.message_id)).fetchone()
         invalidate(conn,body.bot_id,body.group_id,'群消息已撤回')

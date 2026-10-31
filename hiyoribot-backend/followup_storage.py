@@ -75,7 +75,7 @@ def reserve(c,body,row_id,eligible):
         return {}
     c.execute('UPDATE qq_followup_window SET remaining=remaining-1 WHERE bot_id=? AND group_id=?',(body.bot_id,body.group_id))
     reason=None
-    if not body.text.strip() or body.text.lstrip().startswith(('/','!','！')):
+    if (not body.text.strip() and not getattr(body,'has_images',False)) or body.text.lstrip().startswith(('/','!','！')):
         reason='非文字或命令，仅计数'
     elif getattr(body,'addresses_other',False):
         reason='明确@其他成员，仅计数'

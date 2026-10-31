@@ -19,3 +19,9 @@ qq_backend_token: ""
 # 无时间上限、无跟聊冷却，普通群消息仍每50条生成摘要。
 qq_name_trigger_patterns:
   - '妃爱'
+
+# 同账户识图；单并发，每天北京时间100次请求尝试，不另配服务商。
+media_enabled: true
+media_home: 'E:/unser/q/hiyoribot_flash/media'
+vision_model: deepseek-flash
+vision_daily_limit: 100

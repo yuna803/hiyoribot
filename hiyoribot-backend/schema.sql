@@ -110,3 +110,37 @@ CREATE TABLE IF NOT EXISTS qq_followup_origin (
  source_message_row_id INTEGER NOT NULL REFERENCES qq_group_message(id),
  PRIMARY KEY(bot_id,group_id,window_version)
 );
+
+-- 图像本身的描述可按哈希复用；能在哪个会话使用由media_source限定。
+CREATE TABLE IF NOT EXISTS media_asset (
+ id TEXT PRIMARY KEY, suffix TEXT NOT NULL, mime TEXT NOT NULL, bytes INTEGER NOT NULL,
+ width INTEGER NOT NULL, height INTEGER NOT NULL, frames INTEGER NOT NULL,
+ state TEXT NOT NULL DEFAULT 'queued', analysis TEXT, error TEXT,
+ meme_state TEXT NOT NULL DEFAULT 'none', labels TEXT NOT NULL DEFAULT '',
+ uses INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL DEFAULT (unixepoch()),
+ last_seen REAL NOT NULL DEFAULT (unixepoch())
+);
+CREATE TABLE IF NOT EXISTS media_source (
+ bot_id TEXT NOT NULL, user_id TEXT NOT NULL, group_id TEXT NOT NULL DEFAULT '',
+ message_id TEXT NOT NULL, slot INTEGER NOT NULL, asset_id TEXT NOT NULL REFERENCES media_asset(id),
+ manual INTEGER NOT NULL DEFAULT 0, referenced INTEGER NOT NULL DEFAULT 0, reference_message_id TEXT,
+ created_at REAL NOT NULL DEFAULT (unixepoch()),
+ PRIMARY KEY(bot_id,user_id,group_id,message_id,slot)
+);
+CREATE INDEX IF NOT EXISTS media_source_message_idx ON media_source(bot_id,group_id,message_id);
+CREATE TABLE IF NOT EXISTS media_turn_link (
+ message_row_id INTEGER PRIMARY KEY REFERENCES message(id), bot_id TEXT NOT NULL,
+ user_id TEXT NOT NULL, group_id TEXT NOT NULL, external_message_id TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS media_daily (
+ day TEXT PRIMARY KEY, attempts INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS media_control (
+ id INTEGER PRIMARY KEY CHECK(id=1), paused TEXT
+);
+CREATE TABLE IF NOT EXISTS media_delivery (
+ id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, user_id TEXT NOT NULL, group_id TEXT NOT NULL,
+ asset_id TEXT NOT NULL REFERENCES media_asset(id), state TEXT NOT NULL DEFAULT 'pending',
+ message_id TEXT, created_at REAL NOT NULL DEFAULT (unixepoch()), sent_at REAL
+);
+CREATE INDEX IF NOT EXISTS media_delivery_stream_idx ON media_delivery(bot_id,group_id,user_id,state,sent_at);

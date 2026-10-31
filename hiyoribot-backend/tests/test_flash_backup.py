@@ -8,6 +8,12 @@ import unittest
 from pathlib import Path
 
 import storage
+import media_service
+import base64
+import io
+from PIL import Image
+from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('database_backup', ROOT / 'tools' / 'database_backup.py')
@@ -75,6 +81,26 @@ class BackupTest(unittest.TestCase):
         finally:
             process.communicate('\n', timeout=10)
         self.assertEqual(process.returncode, 0)
+
+    def test_media_manifest_copy_restore_and_tamper(self):
+        cfg=SimpleNamespace(media_home=None,qq_owner_id='100001')
+        out=io.BytesIO();Image.new('RGB',(8,8),'red').save(out,format='PNG')
+        with patch.object(media_service,'kick'):
+            identifier=media_service.ingest(media_service.Upload(bot_id='100002',user_id='100001',
+                message_id='1',slot=0,data=base64.b64encode(out.getvalue()).decode(),manual=True),cfg)['asset_id']
+        media_service.manage(media_service.Manage(bot_id='100002',user_id='100001',command='/表情 通过 '+identifier),cfg)
+        saved=tool.backup(self.database,self.folder)
+        manifest=tool.check(saved)
+        self.assertEqual(len(manifest['media']),1)
+        original=self.database.parent/'media'/manifest['media'][0]['name']
+        original.unlink()
+        # 安全备份不能掩盖批准图库缺失，先提供安全副本再恢复。
+        original.write_bytes(out.getvalue())
+        safety=tool.restore(saved,self.database,self.folder,self.database.name)
+        self.assertEqual(original.read_bytes(),out.getvalue())
+        self.assertEqual(len(tool.check(safety)['media']),1)
+        (saved.with_suffix('.media')/original.name).write_bytes(b'tampered')
+        with self.assertRaises(ValueError):tool.check(saved)
 
 
 if __name__ == '__main__':
