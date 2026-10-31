@@ -51,7 +51,7 @@ python tools/database_backup.py backup --database /var/lib/hiyoribot-flash/hiyor
 python tools/database_backup.py check --file /opt/backups/hiyoribot/备份文件.sqlite3
 ```
 
-恢复先停所有写入方，使用既有`restore --confirm-restore 目标数据库文件名`；恢复前自动备份，校验全部图片后先恢复文件再替换数据库，不删除目标多出的安全副本。清单缺失或校验失败不恢复。
+恢复先停所有写入方，使用既有`restore --confirm-restore 目标数据库文件名`；恢复前自动备份，校验全部图片后先恢复文件再替换数据库，不删除目标多出的安全副本。若当前图库已有文件丢失，安全快照明确记录缺失项，仍允许从完整备份修复；缺少批准图片的快照不能当作完整恢复源。清单缺失或校验失败不恢复。
 
 合成图片和模拟OneBot测试不联网。真实视觉预检会产生API费用，明确执行以下命令，报告只放仓库外：
 

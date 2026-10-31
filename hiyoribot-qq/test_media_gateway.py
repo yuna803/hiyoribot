@@ -101,5 +101,20 @@ class MediaGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(prepared[0]['has_images'])
         self.assertTrue(any(path=='group/bot-message' and p.get('opens_window') for path,p in self.calls))
 
+    async def test_proactive_pure_meme_uses_current_group_and_one_window(self):
+        self.bot.send_group_msg=AsyncMock(return_value={'message_id':1003})
+        async def api(method,path,*,payload=None,**kw):
+            self.calls.append((path,payload))
+            if path=='group/claim':
+                return {'send':True,'group_id':'123','reply':'','attachments':[{'asset_id':'a'*64,'description':'开心'}],
+                    'delivery_id':'candidate:x','quote_message_id':'42'}
+            return {}
+        with patch.object(gateway,'api',side_effect=api),patch.object(qq_media,'get_file',new=AsyncMock(return_value=b'gif')) as get:
+            await gateway.send_candidate(self.bot,'x','123')
+        self.assertEqual(get.call_args.args[3]['group_id'],'123')
+        self.assertEqual(self.bot.send_group_msg.call_args.kwargs['group_id'],123)
+        self.assertEqual(sum(path=='group/bot-message' and p.get('opens_window',False) for path,p in self.calls),1)
+        self.assertEqual([p for path,p in self.calls if path=='group/receipt'][0]['state'],'sent')
+
 
 if __name__=='__main__':unittest.main()

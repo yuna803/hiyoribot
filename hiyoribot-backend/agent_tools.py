@@ -73,5 +73,5 @@ def execute(name,arguments,conversation_id,character_name,**unused):
             observations=state['profile']['observations'] if state else []
         return {'observations':[dict(category=o['category'],text=o['text'],**({'user_id':o['user_id']} if 'user_id' in o else {}))
             for o in observations if args.query.casefold() in o['text'].casefold()][:10]}
-    except (sqlite3.Error,ValueError,RuntimeError):
+    except (sqlite3.Error,ValueError,RuntimeError,OSError):
         return {'error':'本地资料查询失败，不要将失败视为没有记忆'}

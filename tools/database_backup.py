@@ -57,7 +57,7 @@ def check(path):
     return manifest
 
 
-def backup(database, folder, media_home=None):
+def backup(database, folder, media_home=None,*,allow_missing=False):
     database, folder = outside_repo(database), outside_repo(folder)
     if not database.is_file():
         raise ValueError('数据库文件不存在')
@@ -76,6 +76,7 @@ def backup(database, folder, media_home=None):
                     'bytes': target.stat().st_size, 'sha256': checksum(target)}
         media_home=outside_repo(media_home or database.parent/'media')
         manifest['media']=[]
+        manifest['missing_media']=[]
         with closing(readonly(target)) as conn:
             if conn.execute("SELECT 1 FROM sqlite_master WHERE name='media_asset'").fetchone():
                 for identifier,suffix,state in conn.execute("SELECT id,suffix,meme_state FROM media_asset WHERE state<>'expired'"):
@@ -85,7 +86,9 @@ def backup(database, folder, media_home=None):
                     source=media_home/name
                     if not source.is_file():
                         if state=='approved':
-                            raise ValueError('批准图库文件缺失，不能生成完整备份')
+                            if not allow_missing:
+                                raise ValueError('批准图库文件缺失，不能生成完整备份')
+                            manifest['missing_media'].append(name)
                         continue
                     destination=target.with_suffix('.media')/name
                     destination.parent.mkdir(exist_ok=True)
@@ -112,10 +115,13 @@ def restore(path, database, folder, confirmation,media_home=None):
     if not database.is_file():
         raise ValueError('目标数据库不存在，请先初始化')
     manifest=check(path)
+    if manifest.get('missing_media'):
+        raise ValueError('不能把缺少批准图库文件的快照作为完整恢复源')
     media_home=outside_repo(media_home or database.parent/'media')
     storage.configure(database)
     with storage.process_guard():
-        safety = backup(database, folder,media_home)
+        # 灾难恢复时原图库可能已损坏；仍记录现存文件及缺失清单，不阻止恢复完整备份。
+        safety = backup(database, folder,media_home,allow_missing=True)
         # 内容哈希命名的文件先恢复；数据库最后替换，不删除目标中的额外安全副本。
         for item in manifest.get('media',[]):
             media_home.mkdir(parents=True,exist_ok=True)

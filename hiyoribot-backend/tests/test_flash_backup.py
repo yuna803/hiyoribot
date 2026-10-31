@@ -94,11 +94,11 @@ class BackupTest(unittest.TestCase):
         self.assertEqual(len(manifest['media']),1)
         original=self.database.parent/'media'/manifest['media'][0]['name']
         original.unlink()
-        # 安全备份不能掩盖批准图库缺失，先提供安全副本再恢复。
-        original.write_bytes(out.getvalue())
         safety=tool.restore(saved,self.database,self.folder,self.database.name)
         self.assertEqual(original.read_bytes(),out.getvalue())
-        self.assertEqual(len(tool.check(safety)['media']),1)
+        self.assertEqual(tool.check(safety)['missing_media'],[original.name])
+        with self.assertRaises(ValueError):
+            tool.restore(safety,self.database,self.folder,self.database.name)
         (saved.with_suffix('.media')/original.name).write_bytes(b'tampered')
         with self.assertRaises(ValueError):tool.check(saved)
 

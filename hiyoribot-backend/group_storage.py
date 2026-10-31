@@ -238,6 +238,7 @@ def receipt(body):
 def startup(bot):
     with storage.connect(write=True) as conn:
         follow.restart(conn,bot)
+        conn.execute("UPDATE media_delivery SET state='uncertain' WHERE bot_id=? AND state='pending'",(bot,))
         conn.execute('UPDATE qq_group_state SET generation=generation+1 WHERE bot_id=?',(bot,))
         conn.execute("UPDATE qq_group_candidate SET state=CASE WHEN state='sending' THEN 'uncertain' ELSE 'discarded' END,error='进程重启不补发旧稿' WHERE bot_id=? AND state IN ('pending','reviewing','sending')",(bot,))
     return {'ok':True}

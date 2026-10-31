@@ -231,6 +231,35 @@ class MediaTests(unittest.TestCase):
         self.assertIn('images',annotated[0])
         self.assertIn('表情#',annotated[1]['content'])
 
+    def test_restart_does_not_replay_delivery_and_requires_ack(self):
+        identifier=self.upload();media.work(self.cfg);self.manage('/表情 通过 '+identifier)
+        with storage.connect(write=True) as c:
+            media.register_delivery(c,'old',BOT,OTHER,GROUP,[media.attachment(self.asset(identifier))])
+        media.recover(self.cfg)
+        with self.assertRaises(HTTPException):
+            media.file_for(identifier,media.Scope(bot_id=BOT,user_id=OTHER,group_id=GROUP),self.cfg,delivery_id='old')
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            media.Receipt(bot_id=BOT,user_id=OTHER,group_id=GROUP,delivery_id='old',state='sent')
+        self.assertEqual(self.asset(identifier)['uses'],0)
+
+    def test_exact_last_five_not_six_and_max_five_search_results(self):
+        ids=[]
+        for n in range(7):
+            identifier=self.upload(str(n+1),raw=picture((n*30,0,0)))
+            media.work(self.cfg);self.manage('/表情 通过 '+identifier)
+            ids.append(identifier)
+        for n,identifier in enumerate(ids[:6]):
+            with storage.connect(write=True) as c:
+                media.register_delivery(c,str(n),BOT,OTHER,GROUP,[media.attachment(self.asset(identifier))])
+            media.receipt(media.Receipt(bot_id=BOT,user_id=OTHER,group_id=GROUP,delivery_id=str(n),state='sent',message_id=str(n)))
+            with storage.connect(write=True) as c:c.execute('UPDATE media_delivery SET sent_at=? WHERE id=?',(n+1,str(n)))
+        with user_scope.group(BOT,GROUP):
+            results=media.search('开心','',self.cfg)
+            self.assertEqual({r['asset_id'] for r in results},{ids[0],ids[6]})
+        with user_scope.group(BOT,'200002'):
+            self.assertEqual(len(media.search('开心','',self.cfg)),5)
+
     def test_http_auth_and_owner_scope(self):
         with patch('main.resolve_config',return_value=self.cfg),patch('main.load_config',return_value=self.cfg):
             client=TestClient(main.app)

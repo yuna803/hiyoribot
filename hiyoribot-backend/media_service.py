@@ -13,7 +13,7 @@ from threading import Lock
 from fastapi import HTTPException
 from openai import OpenAI
 from PIL import Image,ImageOps,UnidentifiedImageError
-from pydantic import BaseModel,ConfigDict,Field,StrictBool
+from pydantic import BaseModel,ConfigDict,Field,StrictBool,model_validator
 
 import storage
 import user_scope
@@ -24,6 +24,7 @@ FORMATS={'JPEG':('jpg','image/jpeg'),'PNG':('png','image/png'),'GIF':('gif','ima
 _executor=ThreadPoolExecutor(max_workers=1,thread_name_prefix='vision')
 _guard=Lock()
 _decode_lock=Lock()
+_files_lock=Lock()
 _running=False
 _wake=False
 
@@ -57,6 +58,12 @@ class Receipt(Scope):
     state:str=Field(pattern=r'^(sent|failed|uncertain)$')
     message_id:str|None=Field(default=None,pattern=r'^-?[0-9]{1,20}$')
 
+    @model_validator(mode='after')
+    def sent_requires_ack(self):
+        if self.state=='sent' and self.message_id is None:
+            raise ValueError('成功发送必须有QQ消息编号')
+        return self
+
 
 class Analysis(BaseModel):
     model_config=ConfigDict(extra='forbid')
@@ -77,9 +84,11 @@ def home(config):
 def path_for(asset,config):
     if not re.fullmatch(r'[a-f0-9]{64}',asset['id']) or asset['suffix'] not in ('jpg','png','gif','webp'):
         raise ValueError('无效图片编号')
+    # 目录先规范化，文件名已经白名单校验，没有路径分隔符。
+    # 不反复resolve正在被并发原子写入的文件（Windows可能瞬时返回不同路径）。
     p=home(config)/(asset['id']+'.'+asset['suffix'])
-    if not p.resolve().is_relative_to(home(config)):
-        raise ValueError('图片路径越界')
+    if p.is_symlink():
+        raise ValueError('图片文件不能是符号链接')
     return p
 
 
@@ -102,6 +111,11 @@ def _inspect_image(data,*,extract=False):
             suffix,mime=FORMATS[im.format]
             meta=dict(suffix=suffix,mime=mime,width=im.width,height=im.height,frames=frames)
             images=[]
+            if not extract:
+                # 入队前读取像素，拒绝只有合法头部但实际已损坏的文件。
+                for n in sorted({0,frames-1}):
+                    im.seek(n)
+                    im.load()
             if extract:
                 for n in sorted({0,frames//2,frames-1}):
                     im.seek(n)
@@ -122,6 +136,12 @@ def _inspect_image(data,*,extract=False):
 
 
 def ingest(body,config):
+    # ponytail: 单进程小图库串行写文件与登记；多进程部署时再换外部任务队列。
+    with _files_lock:
+        return _ingest(body,config)
+
+
+def _ingest(body,config):
     if not getattr(config,'media_enabled',True):
         return {'state':'disabled'}
     try:
@@ -248,6 +268,7 @@ def kick(config):
 def recover(config):
     with storage.connect(write=True) as c:
         c.execute("UPDATE media_asset SET state='failed',error='进程中断，等待本人重试' WHERE state='running'")
+        c.execute("UPDATE media_delivery SET state='uncertain' WHERE state='pending'")
     cleanup(config)
     kick(config)
 
@@ -431,6 +452,11 @@ def manage(body,config):
 
 
 def cleanup(config):
+    with _files_lock:
+        _cleanup(config)
+
+
+def _cleanup(config):
     with storage.connect(write=True) as c:
         c.execute('DELETE FROM media_source WHERE created_at<unixepoch()-604800')
         expired=c.execute("SELECT * FROM media_asset WHERE meme_state<>'approved' AND last_seen<unixepoch()-604800").fetchall()
